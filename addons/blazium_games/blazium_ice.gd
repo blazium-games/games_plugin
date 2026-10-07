@@ -10,11 +10,51 @@ const STUN_ICE := "https://stun.blazium.online/v1/ice"
 const TURN_SIGNAL := "wss://turn.blazium.online/v1/signal"
 
 var ice_servers: Array = []
+var ice_enabled := true
+var ice_session_id := ""
 var _http: HTTPRequest
+var _hold := false
+var _deferred_jwt := ""
 
-func fetch_ice(jwt: String, session_id: String) -> void:
+func _ready() -> void:
+	add_to_group("blazium_ice")
+
+func set_ice_enabled(on: bool) -> void:
+	ice_enabled = on
+
+func cancel_ice_hold() -> void:
+	_hold = false
+	_deferred_jwt = ""
+
+func hold_ice(on: bool) -> void:
+	_hold = on
+	if on or _deferred_jwt == "":
+		return
+	var jwt := _deferred_jwt
+	_deferred_jwt = ""
+	fetch_ice(jwt, "")
+
+func note_lobby(result: Dictionary) -> void:
+	var body: Dictionary = result
+	if body.has("data") and typeof(body["data"]) == TYPE_DICTIONARY:
+		body = body["data"]
+	if body.has("ice_enabled"):
+		set_ice_enabled(bool(body["ice_enabled"]))
+	var admitted := str(body.get("ice_session_id", ""))
+	if admitted != "":
+		ice_session_id = admitted
+
+func fetch_ice(jwt: String, _session_id: String) -> void:
+	if _hold:
+		_deferred_jwt = jwt
+		return
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
-	if jwt == "" or not _valid_uid(game_uid):
+	var session_id := ice_session_id
+	if session_id == "":
+		var user_id := player_id(jwt, get_tree())
+		if user_id != "":
+			session_id = _ice_session(user_id, game_uid)
+	if not ice_enabled or jwt == "" or session_id == "" or not _valid_uid(game_uid):
 		ice_servers = []
 		ice_denied.emit()
 		return
@@ -22,9 +62,7 @@ func fetch_ice(jwt: String, session_id: String) -> void:
 		_http = HTTPRequest.new()
 		add_child(_http)
 		_http.request_completed.connect(_on_ice)
-	var url := STUN_ICE + "?game_uid=" + game_uid.uri_encode()
-	if session_id != "":
-		url += "&session_id=" + session_id.uri_encode()
+	var url := STUN_ICE + "?game_uid=" + game_uid.uri_encode() + "&session_id=" + session_id.uri_encode()
 	var err := _http.request(url, ["Authorization: Bearer " + jwt])
 	if err != OK:
 		ice_servers = []
@@ -45,6 +83,38 @@ func _on_ice(result: int, code: int, _headers: PackedStringArray, body: PackedBy
 
 func signal_url() -> String:
 	return TURN_SIGNAL
+
+func _ice_session(user_id: String, game_uid: String) -> String:
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	ctx.update((user_id.to_lower() + ":" + game_uid.to_lower()).to_utf8_buffer())
+	return ctx.finish().hex_encode()
+
+static func user_from_jwt(token: String) -> String:
+	var parts := token.split(".")
+	if parts.size() < 2:
+		return ""
+	var segment := parts[1].replace("-", "+").replace("_", "/")
+	var pad := segment.length() % 4
+	if pad != 0:
+		segment += "=".repeat(4 - pad)
+	var body := Marshalls.base64_to_utf8(segment)
+	var parsed = JSON.parse_string(body)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return ""
+	return str(parsed.get("user_uid", parsed.get("uid", parsed.get("user_id", ""))))
+
+static func player_id(token: String, tree: SceneTree) -> String:
+	var id := user_from_jwt(token)
+	if id != "":
+		return id
+	if tree == null:
+		return ""
+	for node in tree.get_nodes_in_group("blazium_games"):
+		var saved := str(node.get("user_id"))
+		if saved != "":
+			return saved
+	return ""
 
 func _valid_uid(uid: String) -> bool:
 	var re := RegEx.new()
