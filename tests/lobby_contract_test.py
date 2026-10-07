@@ -8,4 +8,7 @@ assert '"game_uid": game_uid' in lobby
 assert "join_lobby" in lobby
 assert "HashingContext.HASH_SHA256" in ice
 assert "set_ice_enabled" in ice
+assert "note_lobby" in ice
+assert "ice_enabled" in lobby
+assert "_ask_service" in lobby
 print("lobby contract ok")

@@ -13,8 +13,18 @@ var ice_servers: Array = []
 var ice_enabled := true
 var _http: HTTPRequest
 
+func _ready() -> void:
+	add_to_group("blazium_ice")
+
 func set_ice_enabled(on: bool) -> void:
 	ice_enabled = on
+
+func note_lobby(result: Dictionary) -> void:
+	var body: Dictionary = result
+	if body.has("data") and typeof(body["data"]) == TYPE_DICTIONARY:
+		body = body["data"]
+	if body.has("ice_enabled"):
+		set_ice_enabled(bool(body["ice_enabled"]))
 
 func fetch_ice(jwt: String, _session_id: String) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))

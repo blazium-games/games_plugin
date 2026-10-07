@@ -9,6 +9,7 @@ signal seated(peers: Array)
 signal lobby_failed(message: String)
 
 const LOBBY_URL := "wss://lobby.blazium.online/"
+const API := "https://api.blazium.online/api/v1"
 
 var _socket: WebSocketPeer
 var _jwt := ""
@@ -22,6 +23,7 @@ func create_lobby(jwt: String, lobby_type: String) -> void:
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
+	_ask_service(jwt, "/private/lobbies", {"game_uid": game_uid, "lobby_type": lobby_type})
 	_connect(jwt)
 	_pending_join = ""
 	_queue_after_auth("create_lobby", {"lobby_type": lobby_type, "game_uid": game_uid})
@@ -31,6 +33,7 @@ func join_lobby(jwt: String, lobby_id: String) -> void:
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
+	_ask_service(jwt, "/private/lobbies/" + game_uid.uri_encode() + "/join", {"game_uid": game_uid, "lobby_id": lobby_id})
 	_connect(jwt)
 	_pending_join = lobby_id
 	_queue_after_auth("join_lobby", {"lobby_id": lobby_id, "game_uid": game_uid})
@@ -72,9 +75,28 @@ func _process(_delta: float) -> void:
 			continue
 		_on_message(parsed)
 
+func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, _code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed = JSON.parse_string(raw.get_string_from_utf8())
+		if typeof(parsed) == TYPE_DICTIONARY:
+			_note_ice(parsed)
+		http.queue_free()
+	)
+	http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+
+func _note_ice(result: Dictionary) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.call_group("blazium_ice", "note_lobby", result)
+
 func _on_message(message: Dictionary) -> void:
 	var op := str(message.get("op", ""))
 	var payload: Dictionary = message.get("payload", {})
+	if payload.has("ice_enabled"):
+		_note_ice(payload)
 	if op == "lobby_loading" or str(payload.get("state", "")) == "lobby_loading":
 		lobby_loading.emit()
 		return
