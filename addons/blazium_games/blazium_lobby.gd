@@ -152,6 +152,15 @@ func _on_message(message: Dictionary) -> void:
 		var err: Dictionary = message.get("err", {})
 		lobby_failed.emit(str(err.get("message", "Lobby request failed")))
 
+func leave_lobby() -> void:
+	if _socket != null and _socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+		_send("leave_lobby", {})
+		_socket.close()
+	_socket = null
+	_authed = false
+	_queued_op = ""
+	_queued_payload = {}
+
 func _send(op: String, payload: Dictionary) -> void:
 	if _socket == null:
 		return

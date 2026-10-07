@@ -36,4 +36,10 @@ assert 'replace("_", "/")' in ice
 assert "ice_session_id" in ice
 fetch = ice.split("func fetch_ice", 1)[1].split("func _on_ice", 1)[0]
 assert fetch.index("ice_session_id") < fetch.index("_ice_session")
+assert "func leave_lobby" in lobby
+assert '"leave_lobby"' in lobby
+assert lobby.index('"leave_lobby"') < lobby.index("_socket.close()")
+assert "/private/library/" in games
+assert "playtime" in games
+assert 'body.get("logged_on"' in games
 print("lobby contract ok")

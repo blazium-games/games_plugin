@@ -9,6 +9,7 @@ signal logged_in(jwt: String)
 signal login_failed(message: String)
 
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
+const API := "https://api.blazium.online/api/v1"
 
 var jwt: String = ""
 var user_id: String = ""
@@ -16,6 +17,8 @@ var game_uid: String = ""
 
 var _socket: WebSocketPeer
 var _sent_getid := false
+var _play_accum := 0.0
+var _reporting := true
 
 func _ready() -> void:
 	add_to_group("blazium_games")
@@ -27,6 +30,8 @@ func start_login() -> void:
 		return
 	jwt = ""
 	user_id = ""
+	_reporting = true
+	_play_accum = 0.0
 	_sent_getid = false
 	_socket = WebSocketPeer.new()
 	_socket.supported_protocols = PackedStringArray(["blazium", game_uid])
@@ -35,7 +40,8 @@ func start_login() -> void:
 		login_failed.emit("WebSocket connect failed")
 		_socket = null
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_tick_playtime(delta)
 	if _socket == null:
 		return
 	_socket.poll()
@@ -68,12 +74,37 @@ func _on_message(message: Dictionary) -> void:
 			login_failed.emit("Login response had no token")
 			return
 		jwt = token
+		_reporting = true
+		_play_accum = 0.0
 		user_id = str(message.get("uid", message.get("user_id", "")))
 		_socket.close()
 		_socket = null
 		logged_in.emit(jwt)
 	elif action == "error":
 		login_failed.emit(str(message.get("message", "Login failed")))
+
+func _tick_playtime(delta: float) -> void:
+	if jwt == "" or not _reporting or not _valid_uid(game_uid):
+		return
+	_play_accum += delta
+	if _play_accum < 60.0:
+		return
+	var seconds := int(_play_accum)
+	if seconds > 300:
+		seconds = 300
+	_play_accum = 0.0
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed = JSON.parse_string(raw.get_string_from_utf8())
+		var body = parsed
+		if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("data", null)) == TYPE_DICTIONARY:
+			body = parsed["data"]
+		if code == 401 or (typeof(body) == TYPE_DICTIONARY and str(body.get("logged_on", "")) == "false"):
+			_reporting = false
+		http.queue_free()
+	)
+	http.request(API + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
 
 func _valid_uid(uid: String) -> bool:
 	var re := RegEx.new()
