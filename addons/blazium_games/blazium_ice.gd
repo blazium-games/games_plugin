@@ -11,6 +11,7 @@ const TURN_SIGNAL := "wss://turn.blazium.online/v1/signal"
 
 var ice_servers: Array = []
 var ice_enabled := true
+var ice_session_id := ""
 var _http: HTTPRequest
 var _hold := false
 var _deferred_jwt := ""
@@ -39,14 +40,21 @@ func note_lobby(result: Dictionary) -> void:
 		body = body["data"]
 	if body.has("ice_enabled"):
 		set_ice_enabled(bool(body["ice_enabled"]))
+	var admitted := str(body.get("ice_session_id", ""))
+	if admitted != "":
+		ice_session_id = admitted
 
 func fetch_ice(jwt: String, _session_id: String) -> void:
 	if _hold:
 		_deferred_jwt = jwt
 		return
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
-	var user_id := _user_from_jwt(jwt)
-	if not ice_enabled or jwt == "" or user_id == "" or not _valid_uid(game_uid):
+	var session_id := ice_session_id
+	if session_id == "":
+		var user_id := user_from_jwt(jwt)
+		if user_id != "":
+			session_id = _ice_session(user_id, game_uid)
+	if not ice_enabled or jwt == "" or session_id == "" or not _valid_uid(game_uid):
 		ice_servers = []
 		ice_denied.emit()
 		return
@@ -54,7 +62,6 @@ func fetch_ice(jwt: String, _session_id: String) -> void:
 		_http = HTTPRequest.new()
 		add_child(_http)
 		_http.request_completed.connect(_on_ice)
-	var session_id := _ice_session(user_id, game_uid)
 	var url := STUN_ICE + "?game_uid=" + game_uid.uri_encode() + "&session_id=" + session_id.uri_encode()
 	var err := _http.request(url, ["Authorization: Bearer " + jwt])
 	if err != OK:
@@ -83,11 +90,15 @@ func _ice_session(user_id: String, game_uid: String) -> String:
 	ctx.update((user_id.to_lower() + ":" + game_uid.to_lower()).to_utf8_buffer())
 	return ctx.finish().hex_encode()
 
-func _user_from_jwt(token: String) -> String:
+static func user_from_jwt(token: String) -> String:
 	var parts := token.split(".")
 	if parts.size() < 2:
 		return ""
-	var body := Marshalls.base64_to_utf8(parts[1])
+	var segment := parts[1].replace("-", "+").replace("_", "/")
+	var pad := segment.length() % 4
+	if pad != 0:
+		segment += "=".repeat(4 - pad)
+	var body := Marshalls.base64_to_utf8(segment)
 	var parsed = JSON.parse_string(body)
 	if typeof(parsed) != TYPE_DICTIONARY:
 		return ""

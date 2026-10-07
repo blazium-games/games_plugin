@@ -65,7 +65,7 @@ func _process(_delta: float) -> void:
 		if _game_uid == "":
 			lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 			return
-		_send("auth", {"token": _jwt, "user_id": _user_from_jwt(_jwt), "game_uid": _game_uid})
+		_send("auth", {"token": _jwt, "user_id": BlaziumIce.user_from_jwt(_jwt), "game_uid": _game_uid})
 		_authed = true
 	while _socket != null and _socket.get_available_packet_count() > 0:
 		var parsed = JSON.parse_string(_socket.get_packet().get_string_from_utf8())
@@ -92,7 +92,13 @@ func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
 		_connect(jwt)
 		http.queue_free()
 	)
-	http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+	var err := http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+	if err != OK:
+		_queued_op = ""
+		_queued_payload = {}
+		_cancel_ice_hold()
+		lobby_failed.emit("Lobby request failed")
+		http.queue_free()
 
 func _lobby_error(parsed, code: int) -> String:
 	if typeof(parsed) == TYPE_DICTIONARY:
@@ -165,13 +171,3 @@ func _valid_uid(uid: String) -> bool:
 	var re := RegEx.new()
 	re.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 	return re.search(uid) != null
-
-func _user_from_jwt(token: String) -> String:
-	var parts := token.split(".")
-	if parts.size() < 2:
-		return ""
-	var body := Marshalls.base64_to_utf8(parts[1])
-	var parsed = JSON.parse_string(body)
-	if typeof(parsed) != TYPE_DICTIONARY:
-		return ""
-	return str(parsed.get("uid", parsed.get("user_id", "")))
