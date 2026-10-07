@@ -39,6 +39,9 @@ assert fetch.index("ice_session_id") < fetch.index("_ice_session")
 assert "func leave_lobby" in lobby
 assert '"leave_lobby"' in lobby
 assert lobby.index('"leave_lobby"') < lobby.index("_socket.close()")
+assert 'op == "lobby_created"' in lobby
+assert 'op == "joined_lobby"' in lobby
+assert 'err.get("msg"' in lobby
 assert "/private/library/" in games
 assert "playtime" in games
 assert 'body.get("logged_on"' in games

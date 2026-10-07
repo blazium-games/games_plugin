@@ -144,13 +144,17 @@ func _on_message(message: Dictionary) -> void:
 			return
 		if payload.has("lobby_id"):
 			lobby_created.emit(str(payload["lobby_id"]))
-		if payload.has("peers"):
+			seated.emit(payload.get("peers", []))
+		elif payload.has("peers"):
 			seated.emit(payload["peers"])
-	elif op == "seated" or payload.has("peers"):
+	elif op == "seated" or op == "lobby_created" or op == "joined_lobby" or payload.has("peers"):
 		seated.emit(payload.get("peers", []))
 	elif message.has("ok") and message.get("ok") == false:
 		var err: Dictionary = message.get("err", {})
-		lobby_failed.emit(str(err.get("message", "Lobby request failed")))
+		var reason := str(err.get("msg", err.get("message", "")))
+		if reason == "":
+			reason = "Lobby request failed"
+		lobby_failed.emit(reason)
 
 func leave_lobby() -> void:
 	if _socket != null and _socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
