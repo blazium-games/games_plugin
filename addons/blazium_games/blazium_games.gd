@@ -11,12 +11,14 @@ signal login_failed(message: String)
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 
 var jwt: String = ""
+var user_id: String = ""
 var game_uid: String = ""
 
 var _socket: WebSocketPeer
 var _sent_getid := false
 
 func _ready() -> void:
+	add_to_group("blazium_games")
 	game_uid = str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 
 func start_login() -> void:
@@ -24,6 +26,7 @@ func start_login() -> void:
 		login_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
 	jwt = ""
+	user_id = ""
 	_sent_getid = false
 	_socket = WebSocketPeer.new()
 	_socket.supported_protocols = PackedStringArray(["blazium", game_uid])
@@ -65,6 +68,7 @@ func _on_message(message: Dictionary) -> void:
 			login_failed.emit("Login response had no token")
 			return
 		jwt = token
+		user_id = str(message.get("uid", message.get("user_id", "")))
 		_socket.close()
 		_socket = null
 		logged_in.emit(jwt)

@@ -65,7 +65,7 @@ func _process(_delta: float) -> void:
 		if _game_uid == "":
 			lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 			return
-		_send("auth", {"token": _jwt, "user_id": BlaziumIce.user_from_jwt(_jwt), "game_uid": _game_uid})
+		_send("auth", {"token": _jwt, "user_id": BlaziumIce.player_id(_jwt, get_tree()), "game_uid": _game_uid})
 		_authed = true
 	while _socket != null and _socket.get_available_packet_count() > 0:
 		var parsed = JSON.parse_string(_socket.get_packet().get_string_from_utf8())

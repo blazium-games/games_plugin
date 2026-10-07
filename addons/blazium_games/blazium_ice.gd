@@ -51,7 +51,7 @@ func fetch_ice(jwt: String, _session_id: String) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 	var session_id := ice_session_id
 	if session_id == "":
-		var user_id := user_from_jwt(jwt)
+		var user_id := player_id(jwt, get_tree())
 		if user_id != "":
 			session_id = _ice_session(user_id, game_uid)
 	if not ice_enabled or jwt == "" or session_id == "" or not _valid_uid(game_uid):
@@ -102,7 +102,19 @@ static func user_from_jwt(token: String) -> String:
 	var parsed = JSON.parse_string(body)
 	if typeof(parsed) != TYPE_DICTIONARY:
 		return ""
-	return str(parsed.get("uid", parsed.get("user_id", "")))
+	return str(parsed.get("user_uid", parsed.get("uid", parsed.get("user_id", ""))))
+
+static func player_id(token: String, tree: SceneTree) -> String:
+	var id := user_from_jwt(token)
+	if id != "":
+		return id
+	if tree == null:
+		return ""
+	for node in tree.get_nodes_in_group("blazium_games"):
+		var saved := str(node.get("user_id"))
+		if saved != "":
+			return saved
+	return ""
 
 func _valid_uid(uid: String) -> bool:
 	var re := RegEx.new()
