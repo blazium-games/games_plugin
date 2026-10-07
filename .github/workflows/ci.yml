@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Addon does not load the official DLL
+        run: |
+          set -euo pipefail
+          test -f addons/blazium_games/plugin.cfg
+          if grep -R -n -E 'games_sdk|GDExtension|\.dll|LoginClient|ScriptedLobbyClient' addons; then
+            echo "games_plugin authenticates with the login websocket only"
+            exit 1
+          fi

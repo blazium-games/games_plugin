@@ -13,7 +13,8 @@ var ice_servers: Array = []
 var _http: HTTPRequest
 
 func fetch_ice(jwt: String, session_id: String) -> void:
-	if jwt == "":
+	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	if jwt == "" or not _valid_uid(game_uid):
 		ice_servers = []
 		ice_denied.emit()
 		return
@@ -21,9 +22,9 @@ func fetch_ice(jwt: String, session_id: String) -> void:
 		_http = HTTPRequest.new()
 		add_child(_http)
 		_http.request_completed.connect(_on_ice)
-	var url := STUN_ICE
+	var url := STUN_ICE + "?game_uid=" + game_uid.uri_encode()
 	if session_id != "":
-		url += "?session_id=" + session_id.uri_encode()
+		url += "&session_id=" + session_id.uri_encode()
 	var err := _http.request(url, ["Authorization: Bearer " + jwt])
 	if err != OK:
 		ice_servers = []
@@ -44,3 +45,8 @@ func _on_ice(result: int, code: int, _headers: PackedStringArray, body: PackedBy
 
 func signal_url() -> String:
 	return TURN_SIGNAL
+
+func _valid_uid(uid: String) -> bool:
+	var re := RegEx.new()
+	re.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+	return re.search(uid) != null

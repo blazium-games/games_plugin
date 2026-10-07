@@ -8,7 +8,7 @@ signal lobby_loading
 signal seated(peers: Array)
 signal lobby_failed(message: String)
 
-const LOBBY_URL := "wss://slobby.blazium.online/"
+const LOBBY_URL := "wss://lobby.blazium.online/"
 
 var _socket: WebSocketPeer
 var _jwt := ""
@@ -17,9 +17,13 @@ var _authed := false
 var _pending_join := ""
 
 func create_lobby(jwt: String, lobby_type: String) -> void:
+	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	if not _valid_uid(game_uid):
+		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
+		return
 	_connect(jwt)
 	_pending_join = ""
-	_queue_after_auth("create_lobby", {"lobby_type": lobby_type})
+	_queue_after_auth("create_lobby", {"lobby_type": lobby_type, "game_uid": game_uid})
 
 func join_lobby(jwt: String, lobby_id: String) -> void:
 	_connect(jwt)
@@ -92,6 +96,11 @@ func _send(op: String, payload: Dictionary) -> void:
 	}
 	_next_id += 1
 	_socket.send_text(JSON.stringify(envelope))
+
+func _valid_uid(uid: String) -> bool:
+	var re := RegEx.new()
+	re.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+	return re.search(uid) != null
 
 func _user_from_jwt(token: String) -> String:
 	var parts := token.split(".")

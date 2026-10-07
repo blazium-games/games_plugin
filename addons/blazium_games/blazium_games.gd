@@ -20,14 +20,13 @@ func _ready() -> void:
 	game_uid = str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 
 func start_login() -> void:
+	if not _valid_uid(game_uid):
+		login_failed.emit("blazium/game/game_uid must be the project UUID")
+		return
 	jwt = ""
 	_sent_getid = false
 	_socket = WebSocketPeer.new()
-	var protocol := "blazium"
-	if game_uid != "":
-		_socket.supported_protocols = PackedStringArray([protocol, game_uid])
-	else:
-		_socket.supported_protocols = PackedStringArray([protocol])
+	_socket.supported_protocols = PackedStringArray(["blazium", game_uid])
 	var err := _socket.connect_to_url(LOGIN_URL)
 	if err != OK:
 		login_failed.emit("WebSocket connect failed")
@@ -71,3 +70,8 @@ func _on_message(message: Dictionary) -> void:
 		logged_in.emit(jwt)
 	elif action == "error":
 		login_failed.emit(str(message.get("message", "Login failed")))
+
+func _valid_uid(uid: String) -> bool:
+	var re := RegEx.new()
+	re.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+	return re.search(uid) != null
