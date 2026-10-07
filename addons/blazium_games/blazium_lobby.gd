@@ -76,15 +76,23 @@ func _process(_delta: float) -> void:
 		_on_message(parsed)
 
 func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
+	_hold_ice(true)
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, _code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
 		var parsed = JSON.parse_string(raw.get_string_from_utf8())
 		if typeof(parsed) == TYPE_DICTIONARY:
 			_note_ice(parsed)
+		_hold_ice(false)
 		http.queue_free()
 	)
 	http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+
+func _hold_ice(on: bool) -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.call_group("blazium_ice", "hold_ice", on)
 
 func _note_ice(result: Dictionary) -> void:
 	var tree := get_tree()

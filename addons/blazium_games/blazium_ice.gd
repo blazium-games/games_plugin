@@ -12,12 +12,22 @@ const TURN_SIGNAL := "wss://turn.blazium.online/v1/signal"
 var ice_servers: Array = []
 var ice_enabled := true
 var _http: HTTPRequest
+var _hold := false
+var _deferred_jwt := ""
 
 func _ready() -> void:
 	add_to_group("blazium_ice")
 
 func set_ice_enabled(on: bool) -> void:
 	ice_enabled = on
+
+func hold_ice(on: bool) -> void:
+	_hold = on
+	if on or _deferred_jwt == "":
+		return
+	var jwt := _deferred_jwt
+	_deferred_jwt = ""
+	fetch_ice(jwt, "")
 
 func note_lobby(result: Dictionary) -> void:
 	var body: Dictionary = result
@@ -27,6 +37,9 @@ func note_lobby(result: Dictionary) -> void:
 		set_ice_enabled(bool(body["ice_enabled"]))
 
 func fetch_ice(jwt: String, _session_id: String) -> void:
+	if _hold:
+		_deferred_jwt = jwt
+		return
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 	var user_id := _user_from_jwt(jwt)
 	if not ice_enabled or jwt == "" or user_id == "" or not _valid_uid(game_uid):
