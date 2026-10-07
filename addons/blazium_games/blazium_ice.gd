@@ -21,6 +21,10 @@ func _ready() -> void:
 func set_ice_enabled(on: bool) -> void:
 	ice_enabled = on
 
+func cancel_ice_hold() -> void:
+	_hold = false
+	_deferred_jwt = ""
+
 func hold_ice(on: bool) -> void:
 	_hold = on
 	if on or _deferred_jwt == "":

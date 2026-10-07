@@ -23,20 +23,18 @@ func create_lobby(jwt: String, lobby_type: String) -> void:
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
-	_ask_service(jwt, "/private/lobbies", {"game_uid": game_uid, "lobby_type": lobby_type})
-	_connect(jwt)
 	_pending_join = ""
 	_queue_after_auth("create_lobby", {"lobby_type": lobby_type, "game_uid": game_uid})
+	_ask_service(jwt, "/private/lobbies", {"game_uid": game_uid, "lobby_type": lobby_type})
 
 func join_lobby(jwt: String, lobby_id: String) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
-	_ask_service(jwt, "/private/lobbies/" + game_uid.uri_encode() + "/join", {"game_uid": game_uid, "lobby_id": lobby_id})
-	_connect(jwt)
 	_pending_join = lobby_id
 	_queue_after_auth("join_lobby", {"lobby_id": lobby_id, "game_uid": game_uid})
+	_ask_service(jwt, "/private/lobbies/" + game_uid.uri_encode() + "/join", {"game_uid": game_uid, "lobby_id": lobby_id})
 
 var _queued_op := ""
 var _queued_payload := {}
@@ -79,14 +77,37 @@ func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
 	_hold_ice(true)
 	var http := HTTPRequest.new()
 	add_child(http)
-	http.request_completed.connect(func(_result: int, _code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
 		var parsed = JSON.parse_string(raw.get_string_from_utf8())
+		if result != HTTPRequest.RESULT_SUCCESS or (code != 200 and code != 202):
+			_queued_op = ""
+			_queued_payload = {}
+			_cancel_ice_hold()
+			lobby_failed.emit(_lobby_error(parsed, code))
+			http.queue_free()
+			return
 		if typeof(parsed) == TYPE_DICTIONARY:
 			_note_ice(parsed)
 		_hold_ice(false)
+		_connect(jwt)
 		http.queue_free()
 	)
 	http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+
+func _lobby_error(parsed, code: int) -> String:
+	if typeof(parsed) == TYPE_DICTIONARY:
+		var err = parsed.get("error", {})
+		if typeof(err) == TYPE_DICTIONARY and str(err.get("message", "")) != "":
+			return str(err.get("message", ""))
+	if code == 0:
+		return "Lobby request failed"
+	return "Lobby request failed (%d)" % code
+
+func _cancel_ice_hold() -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.call_group("blazium_ice", "cancel_ice_hold")
 
 func _hold_ice(on: bool) -> void:
 	var tree := get_tree()
