@@ -15,6 +15,7 @@ var _jwt := ""
 var _next_id := 1
 var _authed := false
 var _pending_join := ""
+var _game_uid := ""
 
 func create_lobby(jwt: String, lobby_type: String) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
@@ -26,9 +27,13 @@ func create_lobby(jwt: String, lobby_type: String) -> void:
 	_queue_after_auth("create_lobby", {"lobby_type": lobby_type, "game_uid": game_uid})
 
 func join_lobby(jwt: String, lobby_id: String) -> void:
+	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	if not _valid_uid(game_uid):
+		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
+		return
 	_connect(jwt)
 	_pending_join = lobby_id
-	_queue_after_auth("join_lobby", {"lobby_id": lobby_id})
+	_queue_after_auth("join_lobby", {"lobby_id": lobby_id, "game_uid": game_uid})
 
 var _queued_op := ""
 var _queued_payload := {}
@@ -38,7 +43,12 @@ func _queue_after_auth(op: String, payload: Dictionary) -> void:
 	_queued_payload = payload
 
 func _connect(jwt: String) -> void:
+	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	if not _valid_uid(game_uid):
+		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
+		return
 	_jwt = jwt
+	_game_uid = game_uid
 	_authed = false
 	_socket = WebSocketPeer.new()
 	var err := _socket.connect_to_url(LOBBY_URL)
@@ -51,7 +61,10 @@ func _process(_delta: float) -> void:
 		return
 	_socket.poll()
 	if _socket.get_ready_state() == WebSocketPeer.STATE_OPEN and not _authed and _jwt != "":
-		_send("auth", {"token": _jwt, "user_id": _user_from_jwt(_jwt)})
+		if _game_uid == "":
+			lobby_failed.emit("blazium/game/game_uid must be the project UUID")
+			return
+		_send("auth", {"token": _jwt, "user_id": _user_from_jwt(_jwt), "game_uid": _game_uid})
 		_authed = true
 	while _socket != null and _socket.get_available_packet_count() > 0:
 		var parsed = JSON.parse_string(_socket.get_packet().get_string_from_utf8())
