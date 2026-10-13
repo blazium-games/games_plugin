@@ -7,6 +7,10 @@ extends Node
 signal login_url_received(url: String)
 signal logged_in(jwt: String)
 signal login_failed(message: String)
+signal steam_signed_in(steam_id: String, token: String)
+signal steam_sign_in_failed(message: String)
+signal bug_reported(bug_uid: String)
+signal bug_report_failed(message: String)
 
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 const API := "https://api.blazium.online/api/v1"
@@ -14,6 +18,8 @@ const API := "https://api.blazium.online/api/v1"
 var jwt: String = ""
 var user_id: String = ""
 var game_uid: String = ""
+var steam_token: String = ""
+var steam_id: String = ""
 
 var _socket: WebSocketPeer
 var _sent_getid := false
@@ -105,6 +111,87 @@ func _tick_playtime(delta: float) -> void:
 		http.queue_free()
 	)
 	http.request(API + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
+
+## ticket is the hex string from Steamworks GetAuthTicketForWebApi. The identity
+## must be the ticket secret configured on the listing. This does not link Steamworks.
+func sign_in_with_steam_ticket(ticket: String) -> void:
+	if not _valid_uid(game_uid):
+		steam_sign_in_failed.emit("blazium/game/game_uid must be the project UUID")
+		return
+	var hex := ticket.strip_edges()
+	if hex == "":
+		steam_sign_in_failed.emit("ticket is empty")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			steam_sign_in_failed.emit(_error_text(body, "Steam sign-in failed"))
+		else:
+			steam_token = str(body.get("token", ""))
+			steam_id = str(body.get("steam_id", ""))
+			if steam_token == "":
+				steam_sign_in_failed.emit("Steam sign-in had no token")
+			else:
+				steam_signed_in.emit(steam_id, steam_token)
+		http.queue_free()
+	)
+	http.request(API + "/steam/" + game_uid.uri_encode() + "/auth", ["Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"ticket": hex}))
+
+## Files an in-game bug. Uses the Steam session when one is stored, otherwise the Blazium login.
+func report_bug(message: String, client_version: String = "", os_name: String = "", arch: String = "", log_text: String = "", screenshot_path: String = "") -> void:
+	var token := steam_token if steam_token != "" else jwt
+	if token == "" or not _valid_uid(game_uid):
+		bug_report_failed.emit("Sign in before reporting a bug")
+		return
+	var boundary := "blazium-%s" % str(Time.get_unix_time_from_system())
+	var body := PackedByteArray()
+	_part(body, boundary, "message", message)
+	if client_version != "":
+		_part(body, boundary, "client_version", client_version)
+	if os_name != "":
+		_part(body, boundary, "os", os_name)
+	if arch != "":
+		_part(body, boundary, "arch", arch)
+	if log_text != "":
+		_part(body, boundary, "log", log_text)
+	if screenshot_path != "" and FileAccess.file_exists(screenshot_path):
+		var file := FileAccess.get_file_as_bytes(screenshot_path)
+		var name := screenshot_path.get_file()
+		body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"screenshot\"; filename=\"%s\"\r\nContent-Type: application/octet-stream\r\n\r\n" % [boundary, name]).to_utf8_buffer())
+		body.append_array(file)
+		body.append_array("\r\n".to_utf8_buffer())
+	body.append_array(("--%s--\r\n" % boundary).to_utf8_buffer())
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed := _data(raw)
+		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+			bug_report_failed.emit(_error_text(parsed, "Bug report failed"))
+		else:
+			bug_reported.emit(str(parsed.get("bug_uid", "")))
+		http.queue_free()
+	)
+	http.request(API + "/games/" + game_uid.uri_encode() + "/bugs", ["Authorization: Bearer " + token, "Content-Type: multipart/form-data; boundary=" + boundary], HTTPClient.METHOD_POST, body)
+
+func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
+	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())
+
+func _data(raw: PackedByteArray) -> Variant:
+	var parsed = JSON.parse_string(raw.get_string_from_utf8())
+	if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("data", null)) == TYPE_DICTIONARY:
+		return parsed["data"]
+	return parsed
+
+func _error_text(body: Variant, fallback: String) -> String:
+	if typeof(body) == TYPE_DICTIONARY:
+		var err = body.get("error", body.get("message", ""))
+		if typeof(err) == TYPE_DICTIONARY:
+			return str(err.get("message", fallback))
+		if str(err) != "":
+			return str(err)
+	return fallback
 
 func _valid_uid(uid: String) -> bool:
 	var re := RegEx.new()
