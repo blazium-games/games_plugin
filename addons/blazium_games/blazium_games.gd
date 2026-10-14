@@ -22,6 +22,39 @@ signal patch_notices_failed(message: String)
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 const API := "https://api.blazium.online/api/v1"
 
+func _discord_application_id() -> String:
+	if OS.get_name() != "Web":
+		return ""
+	var bridge = Engine.get_singleton("JavaScriptBridge")
+	if bridge == null:
+		return ""
+	var embedded = bridge.eval("typeof window !== 'undefined' && !!window.DiscordEmbed && window.DiscordEmbed.isDiscordEmbed()", true)
+	if embedded != true:
+		return ""
+	var host := str(bridge.eval("window.location.hostname", true))
+	if not host.ends_with(".discordsays.com"):
+		return ""
+	var id := host.split(".")[0]
+	if id.length() < 17 or id.length() > 20:
+		return ""
+	for i in id.length():
+		var c := id.unicode_at(i)
+		if c < 48 or c > 57:
+			return ""
+	return id
+
+func _api() -> String:
+	var id := _discord_application_id()
+	if id != "":
+		return "https://%s.discordsays.com/.proxy/blazium/api/api/v1" % id
+	return API
+
+func _login_url() -> String:
+	var id := _discord_application_id()
+	if id != "":
+		return "wss://%s.discordsays.com/.proxy/blazium/login/api/v1/connect" % id
+	return LOGIN_URL
+
 var jwt: String = ""
 var user_id: String = ""
 var game_uid: String = ""
@@ -48,7 +81,7 @@ func start_login() -> void:
 	_sent_getid = false
 	_socket = WebSocketPeer.new()
 	_socket.supported_protocols = PackedStringArray(["blazium", game_uid])
-	var err := _socket.connect_to_url(LOGIN_URL)
+	var err := _socket.connect_to_url(_login_url())
 	if err != OK:
 		login_failed.emit("WebSocket connect failed")
 		_socket = null
@@ -117,7 +150,7 @@ func _tick_playtime(delta: float) -> void:
 			_reporting = false
 		http.queue_free()
 	)
-	http.request(API + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
+	http.request(_api() + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
 
 ## ticket is the hex string from Steamworks GetAuthTicketForWebApi. The identity
 ## must be the ticket secret configured on the listing. This does not link Steamworks.
@@ -144,7 +177,7 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 				steam_signed_in.emit(steam_id, steam_token)
 		http.queue_free()
 	)
-	http.request(API + "/steam/" + game_uid.uri_encode() + "/auth", ["Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"ticket": hex}))
+	http.request(_api() + "/steam/" + game_uid.uri_encode() + "/auth", ["Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"ticket": hex}))
 
 ## Files an in-game bug. Uses the Steam session when one is stored, otherwise the Blazium login.
 func report_bug(message: String, client_version: String = "", os_name: String = "", arch: String = "", log_text: String = "", screenshot_path: String = "") -> void:
@@ -180,7 +213,7 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 			bug_reported.emit(str(parsed.get("bug_uid", "")))
 		http.queue_free()
 	)
-	http.request(API + "/games/" + game_uid.uri_encode() + "/bugs", ["Authorization: Bearer " + token, "Content-Type: multipart/form-data; boundary=" + boundary], HTTPClient.METHOD_POST, body)
+	http.request(_api() + "/games/" + game_uid.uri_encode() + "/bugs", ["Authorization: Bearer " + token, "Content-Type: multipart/form-data; boundary=" + boundary], HTTPClient.METHOD_POST, body)
 
 ## Answers whether this session owns an edition (sku slug or kind) and, optionally, a second listing used as DLC.
 func ownership(edition: String = "", listing_uid: String = "") -> void:
@@ -202,7 +235,7 @@ func ownership(edition: String = "", listing_uid: String = "") -> void:
 			ownership_ready.emit(body)
 		http.queue_free()
 	)
-	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership" + query, ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+	http.request(_api() + "/private/games/" + game_uid.uri_encode() + "/ownership" + query, ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
 
 ## Reads this player's unlocked achievements and stat values.
 func progress() -> void:
@@ -219,7 +252,7 @@ func progress() -> void:
 			progress_ready.emit(body)
 		http.queue_free()
 	)
-	http.request(API + "/private/player/progress?game_id=" + game_uid.uri_encode(), ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+	http.request(_api() + "/private/player/progress?game_id=" + game_uid.uri_encode(), ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
 
 ## Sets this player's status when presence_writers includes client. A lobby signature is not sent.
 func set_presence(status: String) -> void:
@@ -243,7 +276,7 @@ func set_presence(status: String) -> void:
 			return
 		_progress({"game_id": game_uid, "kind": "presence", "status": status})
 	)
-	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+	http.request(_api() + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
 
 ## Reads the newest stable patch note this player has not acknowledged.
 func patch_notices() -> void:
@@ -270,7 +303,7 @@ func _patch(method: String, raw_body: String) -> void:
 	)
 	var verb := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
 	var path := "/patch/notices" if method == "GET" else "/patch/notices/ack"
-	http.request(API + "/games/" + game_uid.uri_encode() + path, ["Authorization: Bearer " + token, "Content-Type: application/json"], verb, raw_body)
+	http.request(_api() + "/games/" + game_uid.uri_encode() + path, ["Authorization: Bearer " + token, "Content-Type: application/json"], verb, raw_body)
 
 func unlock_achievement(slug: String) -> void:
 	_progress({"game_id": game_uid, "kind": "achievement", "slug": slug})
@@ -303,7 +336,7 @@ func record_standard_events(build_id: String, device_uid: String = "plugin") -> 
 			progress_recorded.emit({"standard": true, "count": 6})
 		http.queue_free()
 	)
-	http.request(API + "/public/events", ["Content-Type: application/json", "X-App-Id: " + game_uid, "X-Build-Id: " + build_id], HTTPClient.METHOD_POST, JSON.stringify({"events": events}))
+	http.request(_api() + "/public/events", ["Content-Type: application/json", "X-App-Id: " + game_uid, "X-Build-Id: " + build_id], HTTPClient.METHOD_POST, JSON.stringify({"events": events}))
 
 ## Applies a scripted-lobby presence notification. Ignored unless presence_writers includes scripted_lobby.
 ## The lobby host signs the notice. A caller cannot claim the scripted_lobby writer without that signature.
@@ -329,7 +362,7 @@ func apply_lobby_presence(status: String, lobby_id: String, notice_exp: int = 0,
 			"notice_sig": notice_sig,
 		})
 	)
-	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+	http.request(_api() + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
 
 func server_unlock_achievement(server_key: String, user_uid: String, slug: String) -> void:
 	_server_progress(server_key, {"user_uid": user_uid, "kind": "achievement", "slug": slug, "event": ""})
@@ -354,7 +387,7 @@ func _server_progress(server_key: String, body: Dictionary) -> void:
 			progress_recorded.emit(parsed)
 		http.queue_free()
 	)
-	http.request(API + "/server/progress", ["Authorization: Bearer " + server_key, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+	http.request(_api() + "/server/progress", ["Authorization: Bearer " + server_key, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 
 func _progress(body: Dictionary) -> void:
 	if jwt == "" or not _valid_uid(game_uid):
@@ -370,7 +403,7 @@ func _progress(body: Dictionary) -> void:
 			progress_recorded.emit(parsed)
 		http.queue_free()
 	)
-	http.request(API + "/private/player/progress", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+	http.request(_api() + "/private/player/progress", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 
 func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
 	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())

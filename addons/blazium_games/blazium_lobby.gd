@@ -11,6 +11,39 @@ signal lobby_failed(message: String)
 const LOBBY_URL := "wss://lobby.blazium.online/"
 const API := "https://api.blazium.online/api/v1"
 
+func _discord_application_id() -> String:
+	if OS.get_name() != "Web":
+		return ""
+	var bridge = Engine.get_singleton("JavaScriptBridge")
+	if bridge == null:
+		return ""
+	var embedded = bridge.eval("typeof window !== 'undefined' && !!window.DiscordEmbed && window.DiscordEmbed.isDiscordEmbed()", true)
+	if embedded != true:
+		return ""
+	var host := str(bridge.eval("window.location.hostname", true))
+	if not host.ends_with(".discordsays.com"):
+		return ""
+	var id := host.split(".")[0]
+	if id.length() < 17 or id.length() > 20:
+		return ""
+	for i in id.length():
+		var c := id.unicode_at(i)
+		if c < 48 or c > 57:
+			return ""
+	return id
+
+func _api() -> String:
+	var id := _discord_application_id()
+	if id != "":
+		return "https://%s.discordsays.com/.proxy/blazium/api/api/v1" % id
+	return API
+
+func _lobby_url() -> String:
+	var id := _discord_application_id()
+	if id != "":
+		return "wss://%s.discordsays.com/.proxy/blazium/lobby/" % id
+	return LOBBY_URL
+
 var _socket: WebSocketPeer
 var _jwt := ""
 var _next_id := 1
@@ -52,7 +85,7 @@ func _connect(jwt: String) -> void:
 	_game_uid = game_uid
 	_authed = false
 	_socket = WebSocketPeer.new()
-	var err := _socket.connect_to_url(LOBBY_URL)
+	var err := _socket.connect_to_url(_lobby_url())
 	if err != OK:
 		lobby_failed.emit("Lobby connect failed")
 		_socket = null
@@ -92,7 +125,7 @@ func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
 		_connect(jwt)
 		http.queue_free()
 	)
-	var err := http.request(API + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
+	var err := http.request(_api() + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		_queued_op = ""
 		_queued_payload = {}
