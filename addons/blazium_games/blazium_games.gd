@@ -373,6 +373,26 @@ func server_set_stat(server_key: String, user_uid: String, slug: String, value: 
 func server_record_event(server_key: String, user_uid: String, event_name: String) -> void:
 	_server_progress(server_key, {"user_uid": user_uid, "kind": "event", "slug": "", "event": event_name})
 
+## Reads one owner's unlocks and stats with a game or private server key.
+func server_progress(server_key: String, user_uid: String) -> Dictionary:
+	if server_key == "" or not _valid_uid(user_uid):
+		return {"ok": false, "error": "A server key and player uid are required"}
+	var http := HTTPRequest.new()
+	add_child(http)
+	var err := http.request(_api() + "/server/progress?user_uid=" + user_uid.uri_encode(), ["Authorization: Bearer " + server_key], HTTPClient.METHOD_GET)
+	if err != OK:
+		http.queue_free()
+		return {"ok": false, "error": "Progress read failed"}
+	var result: Array = await http.request_completed
+	http.queue_free()
+	if result.size() < 4:
+		return {"ok": false, "error": "Progress read failed"}
+	var code: int = result[1]
+	var parsed = _data(result[3])
+	if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+		return {"ok": false, "error": _error_text(parsed, "Progress read failed")}
+	return parsed
+
 func _server_progress(server_key: String, body: Dictionary) -> void:
 	if server_key == "" or not _valid_uid(str(body.get("user_uid", ""))):
 		progress_failed.emit("A server key and player uid are required")
