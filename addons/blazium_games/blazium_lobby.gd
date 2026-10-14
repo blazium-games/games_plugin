@@ -130,6 +130,12 @@ func _note_ice(result: Dictionary) -> void:
 func _on_message(message: Dictionary) -> void:
 	var op := str(message.get("op", ""))
 	var payload: Dictionary = message.get("payload", {})
+	if op == "presence":
+		var tree := get_tree()
+		if tree != null:
+			for node in tree.get_nodes_in_group("blazium_games"):
+				node.apply_lobby_presence(str(payload.get("status", "")), str(payload.get("lobby_id", "")))
+		return
 	if payload.has("ice_enabled"):
 		_note_ice(payload)
 	if op == "lobby_loading" or str(payload.get("state", "")) == "lobby_loading":
