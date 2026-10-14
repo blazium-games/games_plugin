@@ -11,6 +11,10 @@ signal steam_signed_in(steam_id: String, token: String)
 signal steam_sign_in_failed(message: String)
 signal bug_reported(bug_uid: String)
 signal bug_report_failed(message: String)
+signal ownership_ready(body: Dictionary)
+signal ownership_failed(message: String)
+signal progress_recorded(body: Dictionary)
+signal progress_failed(message: String)
 
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 const API := "https://api.blazium.online/api/v1"
@@ -174,6 +178,95 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 		http.queue_free()
 	)
 	http.request(API + "/games/" + game_uid.uri_encode() + "/bugs", ["Authorization: Bearer " + token, "Content-Type: multipart/form-data; boundary=" + boundary], HTTPClient.METHOD_POST, body)
+
+## Answers whether this session owns an edition (sku slug or kind) and, optionally, a second listing used as DLC.
+func ownership(edition: String = "", listing_uid: String = "") -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		ownership_failed.emit("Sign in before asking about ownership")
+		return
+	var query := ""
+	if edition != "":
+		query += "?edition=" + edition.uri_encode()
+	if listing_uid != "":
+		query += ("&" if query != "" else "?") + "listing=" + listing_uid.uri_encode()
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			ownership_failed.emit(_error_text(body, "Ownership check failed"))
+		else:
+			ownership_ready.emit(body)
+		http.queue_free()
+	)
+	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership" + query, ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+func unlock_achievement(slug: String) -> void:
+	_progress({"game_id": game_uid, "kind": "achievement", "slug": slug})
+
+func set_stat(slug: String, value: int) -> void:
+	_progress({"game_id": game_uid, "kind": "stat", "slug": slug, "value": value})
+
+func record_event(event_name: String) -> void:
+	_progress({"game_id": game_uid, "kind": "event", "event": event_name})
+
+## Sends session_start, session_end, boot_ok, first_input, quit, and crash on the public launch route.
+func record_standard_events(build_id: String, device_uid: String = "plugin") -> void:
+	if not _valid_uid(game_uid) or build_id == "":
+		progress_failed.emit("A game uid and build id are required")
+		return
+	var events: Array = []
+	for event_name in ["session_start", "session_end", "boot_ok", "first_input", "quit", "crash"]:
+		var ev := {"event": event_name, "device_uid": device_uid}
+		if event_name == "session_end":
+			ev["seconds"] = 0
+		if event_name == "boot_ok" or event_name == "first_input":
+			ev["ms"] = 0
+		events.append(ev)
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		if code < 200 or code >= 300:
+			progress_failed.emit(_error_text(_data(raw), "Launch events were refused"))
+		else:
+			progress_recorded.emit({"standard": true, "count": 6})
+		http.queue_free()
+	)
+	http.request(API + "/public/events", ["Content-Type: application/json", "X-App-Id: " + game_uid, "X-Build-Id: " + build_id], HTTPClient.METHOD_POST, JSON.stringify({"events": events}))
+
+## Applies a scripted-lobby presence notification. Ignored unless presence_writers includes scripted_lobby.
+func apply_lobby_presence(status: String, lobby_id: String) -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		http.queue_free()
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			return
+		var writers: Array = body.get("presence_writers", [])
+		if not writers.has("scripted_lobby"):
+			return
+		_progress({"game_id": game_uid, "kind": "presence", "status": status, "lobby_id": lobby_id, "via": "lobby"})
+	)
+	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+func _progress(body: Dictionary) -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		progress_failed.emit("Sign in before writing progress")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed := _data(raw)
+		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+			progress_failed.emit(_error_text(parsed, "Progress write failed"))
+		else:
+			progress_recorded.emit(parsed)
+		http.queue_free()
+	)
+	http.request(API + "/private/player/progress", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 
 func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
 	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())
