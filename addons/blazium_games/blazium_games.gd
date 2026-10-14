@@ -235,8 +235,9 @@ func record_standard_events(build_id: String, device_uid: String = "plugin") -> 
 	http.request(API + "/public/events", ["Content-Type: application/json", "X-App-Id: " + game_uid, "X-Build-Id: " + build_id], HTTPClient.METHOD_POST, JSON.stringify({"events": events}))
 
 ## Applies a scripted-lobby presence notification. Ignored unless presence_writers includes scripted_lobby.
-func apply_lobby_presence(status: String, lobby_id: String) -> void:
-	if jwt == "" or not _valid_uid(game_uid):
+## The lobby host signs the notice. A caller cannot claim the scripted_lobby writer without that signature.
+func apply_lobby_presence(status: String, lobby_id: String, notice_exp: int = 0, notice_sig: String = "") -> void:
+	if jwt == "" or not _valid_uid(game_uid) or notice_sig == "":
 		return
 	var http := HTTPRequest.new()
 	add_child(http)
@@ -248,9 +249,41 @@ func apply_lobby_presence(status: String, lobby_id: String) -> void:
 		var writers: Array = body.get("presence_writers", [])
 		if not writers.has("scripted_lobby"):
 			return
-		_progress({"game_id": game_uid, "kind": "presence", "status": status, "lobby_id": lobby_id, "via": "lobby"})
+		_progress({
+			"game_id": game_uid,
+			"kind": "presence",
+			"status": status,
+			"lobby_id": lobby_id,
+			"notice_exp": notice_exp,
+			"notice_sig": notice_sig,
+		})
 	)
 	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+func server_unlock_achievement(server_key: String, user_uid: String, slug: String) -> void:
+	_server_progress(server_key, {"user_uid": user_uid, "kind": "achievement", "slug": slug, "event": ""})
+
+func server_set_stat(server_key: String, user_uid: String, slug: String, value: int) -> void:
+	_server_progress(server_key, {"user_uid": user_uid, "kind": "stat", "slug": slug, "event": "", "value": value})
+
+func server_record_event(server_key: String, user_uid: String, event_name: String) -> void:
+	_server_progress(server_key, {"user_uid": user_uid, "kind": "event", "slug": "", "event": event_name})
+
+func _server_progress(server_key: String, body: Dictionary) -> void:
+	if server_key == "" or not _valid_uid(str(body.get("user_uid", ""))):
+		progress_failed.emit("A server key and player uid are required")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed := _data(raw)
+		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+			progress_failed.emit(_error_text(parsed, "Progress write failed"))
+		else:
+			progress_recorded.emit(parsed)
+		http.queue_free()
+	)
+	http.request(API + "/server/progress", ["Authorization: Bearer " + server_key, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 
 func _progress(body: Dictionary) -> void:
 	if jwt == "" or not _valid_uid(game_uid):

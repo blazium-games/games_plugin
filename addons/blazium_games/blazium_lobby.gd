@@ -134,7 +134,9 @@ func _on_message(message: Dictionary) -> void:
 		var tree := get_tree()
 		if tree != null:
 			for node in tree.get_nodes_in_group("blazium_games"):
-				node.apply_lobby_presence(str(payload.get("status", "")), str(payload.get("lobby_id", "")))
+				node.apply_lobby_presence(str(payload.get("status", "")), str(payload.get("lobby_id", "")), int(payload.get("notice_exp", 0)), str(payload.get("notice_sig", "")))
+		if payload.has("ice_enabled"):
+			_note_ice(payload)
 		return
 	if payload.has("ice_enabled"):
 		_note_ice(payload)
