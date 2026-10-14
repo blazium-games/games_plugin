@@ -14,7 +14,10 @@ signal bug_report_failed(message: String)
 signal ownership_ready(body: Dictionary)
 signal ownership_failed(message: String)
 signal progress_recorded(body: Dictionary)
+signal progress_ready(body: Dictionary)
 signal progress_failed(message: String)
+signal patch_notices_ready(body: Dictionary)
+signal patch_notices_failed(message: String)
 
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 const API := "https://api.blazium.online/api/v1"
@@ -200,6 +203,74 @@ func ownership(edition: String = "", listing_uid: String = "") -> void:
 		http.queue_free()
 	)
 	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership" + query, ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+## Reads this player's unlocked achievements and stat values.
+func progress() -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		progress_failed.emit("Sign in before reading progress")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			progress_failed.emit(_error_text(body, "Progress read failed"))
+		else:
+			progress_ready.emit(body)
+		http.queue_free()
+	)
+	http.request(API + "/private/player/progress?game_id=" + game_uid.uri_encode(), ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+## Sets this player's status when presence_writers includes client. A lobby signature is not sent.
+func set_presence(status: String) -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		progress_failed.emit("Sign in before setting presence")
+		return
+	if status.length() > 40:
+		progress_failed.emit("status is too long")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		http.queue_free()
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			progress_failed.emit(_error_text(body, "Presence was refused"))
+			return
+		var writers: Array = body.get("presence_writers", [])
+		if not writers.has("client"):
+			progress_failed.emit("This game does not let the client set presence")
+			return
+		_progress({"game_id": game_uid, "kind": "presence", "status": status})
+	)
+	http.request(API + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
+
+## Reads the newest stable patch note this player has not acknowledged.
+func patch_notices() -> void:
+	_patch("GET", "")
+
+## Acknowledges patch note uids returned by patch_notices.
+func ack_patch_notices(uids: Array) -> void:
+	_patch("POST", JSON.stringify({"uids": uids}))
+
+func _patch(method: String, raw_body: String) -> void:
+	var token := steam_token if steam_token != "" else jwt
+	if token == "" or not _valid_uid(game_uid):
+		patch_notices_failed.emit("Sign in before reading patch notes")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			patch_notices_failed.emit(_error_text(body, "Patch notes were refused"))
+		else:
+			patch_notices_ready.emit(body)
+		http.queue_free()
+	)
+	var verb := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
+	var path := "/patch/notices" if method == "GET" else "/patch/notices/ack"
+	http.request(API + "/games/" + game_uid.uri_encode() + path, ["Authorization: Bearer " + token, "Content-Type: application/json"], verb, raw_body)
 
 func unlock_achievement(slug: String) -> void:
 	_progress({"game_id": game_uid, "kind": "achievement", "slug": slug})
