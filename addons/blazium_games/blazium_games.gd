@@ -310,17 +310,17 @@ func _patch(method: String, raw_body: String) -> void:
 func transfer_item(item_ids: Array, direction: String, request_id: String, itemdef_id: int = 0, count: int = 0) -> void:
 	_item("/private/items/transfer", {"game_id": game_uid, "item_ids": item_ids, "itemdef_id": itemdef_id, "count": count, "direction": direction, "request_id": request_id})
 
-func socket_item(parent_id: String, child_id: String, index: int, request_id: String) -> void:
-	_item("/private/items/socket", {"parent_id": parent_id, "child_id": child_id, "index": index, "request_id": request_id})
+func socket_item(_parent_id: String, _child_id: String, _index: int, _request_id: String) -> void:
+	item_failed.emit("Only the game owner, an accepted admin, or a mint key can socket items")
 
-func unsocket_item(child_id: String, request_id: String) -> void:
-	_item("/private/items/unsocket", {"child_id": child_id, "request_id": request_id})
+func unsocket_item(_child_id: String, _request_id: String) -> void:
+	item_failed.emit("Only the game owner, an accepted admin, or a mint key can unsocket items")
 
-func set_item_stats(item_id: String, stats: Dictionary, request_id: String) -> void:
-	_item("/private/items/stats", {"item_id": item_id, "stats": stats, "request_id": request_id})
+func set_item_stats(_item_id: String, _stats: Dictionary, _request_id: String) -> void:
+	item_failed.emit("Only the game owner, an accepted admin, or a mint key can set item stats")
 
-func use_item(item_id: String, request_id: String) -> void:
-	_item("/private/items/use", {"item_id": item_id, "request_id": request_id})
+func use_item(_item_id: String, _request_id: String) -> void:
+	item_failed.emit("Only the game owner, an accepted admin, or a mint key can use items")
 
 func _item(path: String, body: Dictionary) -> void:
 	if jwt == "" or not _valid_uid(game_uid):
