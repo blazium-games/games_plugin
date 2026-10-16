@@ -18,6 +18,8 @@ signal progress_ready(body: Dictionary)
 signal progress_failed(message: String)
 signal patch_notices_ready(body: Dictionary)
 signal patch_notices_failed(message: String)
+signal item_completed(body: Dictionary)
+signal item_failed(message: String)
 
 const LOGIN_URL := "wss://login.blazium.online/api/v1/connect"
 const API := "https://api.blazium.online/api/v1"
@@ -304,6 +306,37 @@ func _patch(method: String, raw_body: String) -> void:
 	var verb := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
 	var path := "/patch/notices" if method == "GET" else "/patch/notices/ack"
 	http.request(_api() + "/games/" + game_uid.uri_encode() + path, ["Authorization: Bearer " + token, "Content-Type: application/json"], verb, raw_body)
+
+func transfer_item(item_ids: Array, direction: String, request_id: String, itemdef_id: int = 0, count: int = 0) -> void:
+	_item("/private/items/transfer", {"game_id": game_uid, "item_ids": item_ids, "itemdef_id": itemdef_id, "count": count, "direction": direction, "request_id": request_id})
+
+func socket_item(parent_id: String, child_id: String, index: int, request_id: String) -> void:
+	_item("/private/items/socket", {"parent_id": parent_id, "child_id": child_id, "index": index, "request_id": request_id})
+
+func unsocket_item(child_id: String, request_id: String) -> void:
+	_item("/private/items/unsocket", {"child_id": child_id, "request_id": request_id})
+
+func set_item_stats(item_id: String, stats: Dictionary, request_id: String) -> void:
+	_item("/private/items/stats", {"item_id": item_id, "stats": stats, "request_id": request_id})
+
+func use_item(item_id: String, request_id: String) -> void:
+	_item("/private/items/use", {"item_id": item_id, "request_id": request_id})
+
+func _item(path: String, body: Dictionary) -> void:
+	if jwt == "" or not _valid_uid(game_uid):
+		item_failed.emit("Sign in before changing items")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var parsed := _data(raw)
+		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
+			item_failed.emit(_error_text(parsed, "The item action was refused"))
+		else:
+			item_completed.emit(parsed)
+		http.queue_free()
+	)
+	http.request(_api() + path, ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify(body))
 
 func unlock_achievement(slug: String) -> void:
 	_progress({"game_id": game_uid, "kind": "achievement", "slug": slug})
