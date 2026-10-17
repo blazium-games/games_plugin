@@ -11,6 +11,10 @@ signal steam_signed_in(steam_id: String, token: String)
 signal steam_sign_in_failed(message: String)
 signal bug_reported(bug_uid: String)
 signal bug_report_failed(message: String)
+signal bug_notices_ready(body: Dictionary)
+signal bug_notices_failed(message: String)
+signal bug_notices_ready(body: Dictionary)
+signal bug_notices_failed(message: String)
 signal ownership_ready(body: Dictionary)
 signal ownership_failed(message: String)
 signal progress_recorded(body: Dictionary)
@@ -182,7 +186,7 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 	http.request(_api() + "/steam/" + game_uid.uri_encode() + "/auth", ["Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"ticket": hex}))
 
 ## Files an in-game bug. Uses the Steam session when one is stored, otherwise the Blazium login.
-func report_bug(message: String, client_version: String = "", os_name: String = "", arch: String = "", log_text: String = "", screenshot_path: String = "") -> void:
+func report_bug(message: String, client_version: String = "", os_name: String = "", arch: String = "", log_text: String = "", screenshot_path: String = "", build_id: String = "") -> void:
 	var token := steam_token if steam_token != "" else jwt
 	if token == "" or not _valid_uid(game_uid):
 		bug_report_failed.emit("Sign in before reporting a bug")
@@ -196,8 +200,10 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 		_part(body, boundary, "os", os_name)
 	if arch != "":
 		_part(body, boundary, "arch", arch)
+	if build_id != "":
+		_part(body, boundary, "build_id", build_id)
 	if log_text != "":
-		_part(body, boundary, "log", log_text)
+		_part(body, boundary, "log", _redact_log(log_text))
 	if screenshot_path != "" and FileAccess.file_exists(screenshot_path):
 		var file := FileAccess.get_file_as_bytes(screenshot_path)
 		var name := screenshot_path.get_file()
@@ -215,7 +221,49 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 			bug_reported.emit(str(parsed.get("bug_uid", "")))
 		http.queue_free()
 	)
-	http.request(_api() + "/games/" + game_uid.uri_encode() + "/bugs", ["Authorization: Bearer " + token, "Content-Type: multipart/form-data; boundary=" + boundary], HTTPClient.METHOD_POST, body)
+	var headers := PackedStringArray([
+		"Authorization: Bearer " + token,
+		"Content-Type: multipart/form-data; boundary=" + boundary,
+		"X-App-Id: " + game_uid,
+	])
+	if build_id != "":
+		headers.append("X-Build-Id: " + build_id)
+	http.request(_api() + "/games/" + game_uid.uri_encode() + "/bugs", headers, HTTPClient.METHOD_POST, body)
+
+func bug_notices() -> void:
+	_bug_notice("GET", "")
+
+func ack_bug_notices(uids: Array) -> void:
+	_bug_notice("POST", JSON.stringify({"uids": uids}))
+
+func _bug_notice(method: String, raw_body: String) -> void:
+	var token := steam_token if steam_token != "" else jwt
+	if token == "" or not _valid_uid(game_uid):
+		bug_notices_failed.emit("Sign in before reading bug notices")
+		return
+	var http := HTTPRequest.new()
+	add_child(http)
+	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		var body := _data(raw)
+		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+			bug_notices_failed.emit(_error_text(body, "Bug notices were refused"))
+		else:
+			bug_notices_ready.emit(body)
+		http.queue_free()
+	)
+	var verb := HTTPClient.METHOD_GET if method == "GET" else HTTPClient.METHOD_POST
+	var path := "/bugs/notices" if method == "GET" else "/bugs/notices/ack"
+	var headers := PackedStringArray(["Authorization: Bearer " + token, "Content-Type: application/json", "X-App-Id: " + game_uid])
+	http.request(_api() + "/games/" + game_uid.uri_encode() + path, headers, verb, raw_body)
+
+func _redact_log(text: String) -> String:
+	var steam := RegEx.new()
+	if steam.compile("\\b7656119\\d{10}\\b") == OK:
+		text = steam.sub(text, "<steam_id>", true)
+	var discord := RegEx.new()
+	if discord.compile("(\"discord_id\"\\s*:\\s*\")[^\"]*\"") == OK:
+		text = discord.sub(text, "$1<redacted>\"", true)
+	return text
 
 ## Answers whether this session owns an edition (sku slug or kind) and, optionally, a second listing used as DLC.
 func ownership(edition: String = "", listing_uid: String = "") -> void:
