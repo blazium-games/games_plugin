@@ -13,8 +13,6 @@ signal bug_reported(bug_uid: String)
 signal bug_report_failed(message: String)
 signal bug_notices_ready(body: Dictionary)
 signal bug_notices_failed(message: String)
-signal bug_notices_ready(body: Dictionary)
-signal bug_notices_failed(message: String)
 signal ownership_ready(body: Dictionary)
 signal ownership_failed(message: String)
 signal progress_recorded(body: Dictionary)
@@ -191,7 +189,7 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 	if token == "" or not _valid_uid(game_uid):
 		bug_report_failed.emit("Sign in before reporting a bug")
 		return
-	var boundary := "blazium-%s" % str(Time.get_unix_time_from_system())
+	var boundary := "blazium-%08x%08x" % [randi(), randi()]
 	var body := PackedByteArray()
 	_part(body, boundary, "message", message)
 	if client_version != "":
@@ -204,12 +202,11 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 		_part(body, boundary, "build_id", build_id)
 	if log_text != "":
 		_part(body, boundary, "log", _redact_log(log_text))
-	if screenshot_path != "" and FileAccess.file_exists(screenshot_path):
-		var file := FileAccess.get_file_as_bytes(screenshot_path)
-		var name := screenshot_path.get_file()
-		body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"screenshot\"; filename=\"%s\"\r\nContent-Type: application/octet-stream\r\n\r\n" % [boundary, name]).to_utf8_buffer())
-		body.append_array(file)
-		body.append_array("\r\n".to_utf8_buffer())
+	if screenshot_path != "":
+		var shot_error := _append_screenshot(body, boundary, screenshot_path)
+		if shot_error != "":
+			bug_report_failed.emit(shot_error)
+			return
 	body.append_array(("--%s--\r\n" % boundary).to_utf8_buffer())
 	var http := HTTPRequest.new()
 	add_child(http)
@@ -255,6 +252,36 @@ func _bug_notice(method: String, raw_body: String) -> void:
 	var path := "/bugs/notices" if method == "GET" else "/bugs/notices/ack"
 	var headers := PackedStringArray(["Authorization: Bearer " + token, "Content-Type: application/json", "X-App-Id: " + game_uid])
 	http.request(_api() + "/games/" + game_uid.uri_encode() + path, headers, verb, raw_body)
+
+const MAX_SCREENSHOT_BYTES := 32 * 1024 * 1024
+
+func _append_screenshot(body: PackedByteArray, boundary: String, path: String) -> String:
+	var absolute := path
+	if path.begins_with("user://"):
+		absolute = ProjectSettings.globalize_path(path)
+	elif not path.is_absolute_path():
+		return "Screenshot must be inside the game user directory"
+	var root := OS.get_user_data_dir().simplify_path().trim_suffix("/").trim_suffix("\\")
+	absolute = absolute.simplify_path()
+	var root_cmp := root.to_lower()
+	var abs_cmp := absolute.to_lower()
+	if not abs_cmp.begins_with(root_cmp + "/") and not abs_cmp.begins_with(root_cmp + "\\") and abs_cmp != root_cmp:
+		return "Screenshot must be inside the game user directory"
+	if not FileAccess.file_exists(path):
+		return ""
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return ""
+	if file.get_length() > MAX_SCREENSHOT_BYTES:
+		file.close()
+		return "Screenshot is larger than 32 MiB"
+	var bytes := file.get_buffer(file.get_length())
+	file.close()
+	var name := path.get_file().replace("\"", "").replace("\r", "").replace("\n", "")
+	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"screenshot\"; filename=\"%s\"\r\nContent-Type: application/octet-stream\r\n\r\n" % [boundary, name]).to_utf8_buffer())
+	body.append_array(bytes)
+	body.append_array("\r\n".to_utf8_buffer())
+	return ""
 
 func _redact_log(text: String) -> String:
 	var steam := RegEx.new()

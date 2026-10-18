@@ -21,3 +21,18 @@ jobs:
             echo "addon check failed"
             exit 1
           fi
+          python3 - <<'PY'
+          import pathlib, re, sys
+          failed = False
+          for path in pathlib.Path("addons").rglob("*.gd"):
+              names = re.findall(r"(?m)^signal\s+([A-Za-z_][A-Za-z0-9_]*)", path.read_text(encoding="utf-8"))
+              seen = {}
+              for name in names:
+                  seen[name] = seen.get(name, 0) + 1
+              dups = [name for name, count in seen.items() if count > 1]
+              if dups:
+                  print(f"{path}: duplicate signal {', '.join(dups)}")
+                  failed = True
+          if failed:
+              sys.exit(1)
+          PY
