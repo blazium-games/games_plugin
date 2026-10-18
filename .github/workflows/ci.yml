@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [master]
+  workflow_call:
 
 permissions:
   contents: read
@@ -33,6 +34,33 @@ jobs:
               if dups:
                   print(f"{path}: duplicate signal {', '.join(dups)}")
                   failed = True
+          if failed:
+              sys.exit(1)
+          PY
+      - name: No local paths or library source
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          roots = [pathlib.Path("addons"), pathlib.Path("docs"), pathlib.Path("tests"), pathlib.Path("README.md")]
+          banned_names = {"session.cpp", "ipc_client.cpp", "ipc_client.hpp", "exports.cpp", "blaze.cpp", "blaze.hpp"}
+          needles = ("blazium_ecosystem", "C:\\Users", "C:/Users/", "D:\\projects", "/Users/")
+          failed = False
+          files = []
+          for root in roots:
+              if root.is_file():
+                  files.append(root)
+              elif root.is_dir():
+                  files.extend(path for path in root.rglob("*") if path.is_file())
+          for path in files:
+              if path.name in banned_names:
+                  print(f"library source name: {path}")
+                  failed = True
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              for needle in needles:
+                  if needle in text:
+                      print(f"local path in {path}")
+                      failed = True
+                      break
           if failed:
               sys.exit(1)
           PY

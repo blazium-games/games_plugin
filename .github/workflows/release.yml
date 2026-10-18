@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    if: github.ref_name == 'master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Get Version with Bioblaze/game-semver-action
+        id: version
+        uses: Bioblaze/game-semver-action@v10
+        with:
+          personal_github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Finalize version
+        id: finalize
+        run: |
+          set -euo pipefail
+          COMPUTED="${{ steps.version.outputs.simple_version }}"
+          BASE="1.0.0"
+          if [ -z "$COMPUTED" ]; then
+            COMPUTED="$BASE"
+          fi
+          CANDIDATE="$(printf '%s\n%s\n' "$COMPUTED" "$BASE" | sort -V | tail -n1)"
+          echo "simple_version=${CANDIDATE}" >> "$GITHUB_OUTPUT"
+          echo "version ${CANDIDATE}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Skip when this version is already released
+        id: skip
+        env:
+          VER: ${{ steps.finalize.outputs.simple_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "v${VER}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "v${VER} already exists"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Pack addon zip
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          VER: ${{ steps.finalize.outputs.simple_version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/stage
+          cp -a addons dist/stage/addons
+          cp LICENSE dist/stage/LICENSE
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          ver = os.environ["VER"]
+          archive = Path(f"dist/blazium_games-{ver}.zip")
+          allowed = []
+          root = Path("dist/stage")
+          with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+              for path in sorted(root.rglob("*")):
+                  if path.is_file():
+                      name = path.relative_to(root).as_posix()
+                      z.write(path, name)
+                      allowed.append(name)
+          banned_names = {"session.cpp", "ipc_client.cpp", "ipc_client.hpp", "exports.cpp", "blaze.cpp", "blaze.hpp", "CMakeLists.txt"}
+          banned_suffix = (".pdb", ".exp", ".ilk", ".dll", ".so")
+          needles = ("blazium_ecosystem", "C:\\Users", "C:/Users/", "D:\\", "D:/", "/Users/")
+          bad = []
+          for name in allowed:
+              base = name.rsplit("/", 1)[-1]
+              if base in banned_names or name.endswith(banned_suffix):
+                  bad.append(name)
+              if not name.startswith("addons/blazium_games/") and name != "LICENSE":
+                  bad.append(name)
+          blob = archive.read_bytes()
+          for needle in needles:
+              if needle.encode() in blob:
+                  bad.append(needle)
+          if bad:
+              print("archive rejected: " + ", ".join(bad))
+              raise SystemExit(1)
+          print("archive ok: " + ", ".join(allowed))
+          PY
+      - name: Publish
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          VER: ${{ steps.finalize.outputs.simple_version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "v${VER}" \
+            "dist/blazium_games-${VER}.zip" \
+            --title "v${VER}" \
+            --generate-notes
