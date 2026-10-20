@@ -422,26 +422,19 @@ func set_stat(slug: String, value: int) -> void:
 func record_event(event_name: String) -> void:
 	_progress({"game_id": game_uid, "kind": "event", "event": event_name})
 
-## Sends session_start, session_end, boot_ok, first_input, quit, and crash on the public launch route.
-func record_standard_events(build_id: String, device_uid: String = "plugin") -> void:
-	if not _valid_uid(game_uid) or build_id == "":
-		progress_failed.emit("A game uid and build id are required")
+## Sends one named launch event. A crash is not part of a launch.
+func record_standard_events(build_id: String, device_uid: String = "plugin", event_name: String = "session_start") -> void:
+	if not _valid_uid(game_uid) or build_id == "" or event_name == "" or event_name == "crash":
+		progress_failed.emit("Name the launch event. A crash is not a launch event")
 		return
-	var events: Array = []
-	for event_name in ["session_start", "session_end", "boot_ok", "first_input", "quit", "crash"]:
-		var ev := {"event": event_name, "device_uid": device_uid}
-		if event_name == "session_end":
-			ev["seconds"] = 0
-		if event_name == "boot_ok" or event_name == "first_input":
-			ev["ms"] = 0
-		events.append(ev)
+	var events: Array = [{"event": event_name, "device_uid": device_uid}]
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
 		if code < 200 or code >= 300:
 			progress_failed.emit(_error_text(_data(raw), "Launch events were refused"))
 		else:
-			progress_recorded.emit({"standard": true, "count": 6})
+			progress_recorded.emit({"standard": true, "count": 1, "event": event_name})
 		http.queue_free()
 	)
 	http.request(_api() + "/public/events", ["Content-Type: application/json", "X-App-Id: " + game_uid, "X-Build-Id: " + build_id], HTTPClient.METHOD_POST, JSON.stringify({"events": events}))
@@ -473,16 +466,24 @@ func apply_lobby_presence(status: String, lobby_id: String, notice_exp: int = 0,
 	http.request(_api() + "/private/games/" + game_uid.uri_encode() + "/ownership", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_GET)
 
 func server_unlock_achievement(server_key: String, user_uid: String, slug: String) -> void:
+	if not OS.has_feature("dedicated_server"):
+		return
 	_server_progress(server_key, {"user_uid": user_uid, "kind": "achievement", "slug": slug, "event": ""})
 
 func server_set_stat(server_key: String, user_uid: String, slug: String, value: int) -> void:
+	if not OS.has_feature("dedicated_server"):
+		return
 	_server_progress(server_key, {"user_uid": user_uid, "kind": "stat", "slug": slug, "event": "", "value": value})
 
 func server_record_event(server_key: String, user_uid: String, event_name: String) -> void:
+	if not OS.has_feature("dedicated_server"):
+		return
 	_server_progress(server_key, {"user_uid": user_uid, "kind": "event", "slug": "", "event": event_name})
 
 ## Reads one owner's unlocks and stats with a game or private server key.
 func server_progress(server_key: String, user_uid: String) -> Dictionary:
+	if not OS.has_feature("dedicated_server"):
+		return {"ok": false, "error": "Server progress is only available on a dedicated server"}
 	if server_key == "" or not _valid_uid(user_uid):
 		return {"ok": false, "error": "A server key and player uid are required"}
 	var http := HTTPRequest.new()
