@@ -46,6 +46,7 @@ func _lobby_url() -> String:
 
 var _socket: WebSocketPeer
 var _jwt := ""
+var _ticket := ""
 var _next_id := 1
 var _authed := false
 var _pending_join := ""
@@ -98,7 +99,7 @@ func _process(_delta: float) -> void:
 		if _game_uid == "":
 			lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 			return
-		_send("auth", {"token": _jwt, "user_id": BlaziumIce.player_id(_jwt, get_tree()), "game_uid": _game_uid})
+		_send("auth", {"ticket": _ticket, "user_id": BlaziumIce.player_id(_jwt, get_tree()), "game_uid": _game_uid})
 		_authed = true
 	while _socket != null and _socket.get_available_packet_count() > 0:
 		var parsed = JSON.parse_string(_socket.get_packet().get_string_from_utf8())
@@ -119,8 +120,21 @@ func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
 			lobby_failed.emit(_lobby_error(parsed, code))
 			http.queue_free()
 			return
-		if typeof(parsed) == TYPE_DICTIONARY:
-			_note_ice(parsed)
+		var data = parsed
+		if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("data", null)) == TYPE_DICTIONARY:
+			data = parsed["data"]
+		var ticket := ""
+		if typeof(data) == TYPE_DICTIONARY:
+			ticket = str(data.get("ticket", ""))
+			_note_ice(data)
+		if ticket == "":
+			_queued_op = ""
+			_queued_payload = {}
+			_cancel_ice_hold()
+			lobby_failed.emit("Lobby admit did not return a ticket")
+			http.queue_free()
+			return
+		_ticket = ticket
 		_hold_ice(false)
 		_connect(jwt)
 		http.queue_free()

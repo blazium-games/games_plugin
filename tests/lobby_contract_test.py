@@ -22,6 +22,9 @@ ask = lobby.split("func _ask_service", 1)[1].split("func _lobby_error", 1)[0]
 assert ask.index("hold_ice(true)") < ask.index("http.request")
 assert ask.index("code != 200") < ask.index("_note_ice")
 assert ask.index("_note_ice") < ask.index("_connect(")
+assert 'data.get("ticket"' in ask
+assert '"ticket": _ticket' in lobby
+assert '"token": _jwt' not in lobby
 assert "lobby_failed" in ask
 assert ask.index("http.request") < ask.index("if err != OK")
 assert "BlaziumIce.player_id" in lobby
