@@ -4,8 +4,11 @@ extends Node
 ## Scripted lobby socket. Uses the JWT from BlaziumGames. Never downloads the pack.
 
 signal lobby_created(lobby_id: String)
+signal lobby_joined(lobby_id: String)
 signal lobby_loading
 signal seated(peers: Array)
+signal peer_joined(peer_id: String)
+signal peer_left(peer_id: String)
 signal lobby_failed(message: String)
 
 const LOBBY_URL := "wss://lobby.blazium.online/"
@@ -51,23 +54,42 @@ var _next_id := 1
 var _authed := false
 var _pending_join := ""
 var _game_uid := ""
+var _inflight_id := ""
+var _inflight_op := ""
+var _announced_join := ""
 
-func create_lobby(jwt: String, lobby_type: String) -> void:
+func create_lobby(jwt: String, lobby_type: String, options: Dictionary = {}) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
 	_pending_join = ""
-	_queue_after_auth("create_lobby", {"lobby_type": lobby_type, "game_uid": game_uid})
+	var payload := {"lobby_type": lobby_type, "game_uid": game_uid}
+	if options.has("name"):
+		payload["name"] = options["name"]
+	if options.has("max_players"):
+		payload["max_players"] = options["max_players"]
+	if options.has("password"):
+		payload["password"] = options["password"]
+	if options.has("tags"):
+		payload["tags"] = options["tags"]
+	_queue_after_auth("create_lobby", payload)
 	_ask_service(jwt, "/private/lobbies", {"game_uid": game_uid, "lobby_type": lobby_type})
 
-func join_lobby(jwt: String, lobby_id: String) -> void:
+func join_lobby(jwt: String, lobby_id: String, options: Dictionary = {}) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 	if not _valid_uid(game_uid):
 		lobby_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
 	_pending_join = lobby_id
-	_queue_after_auth("join_lobby", {"lobby_id": lobby_id, "game_uid": game_uid})
+	var payload := {"lobby_id": lobby_id, "game_uid": game_uid}
+	if options.has("password"):
+		payload["password"] = options["password"]
+	if options.has("name"):
+		payload["name"] = options["name"]
+	if options.has("max_players"):
+		payload["max_players"] = options["max_players"]
+	_queue_after_auth("join_lobby", payload)
 	_ask_service(jwt, "/private/lobbies/" + game_uid.uri_encode() + "/join", {"game_uid": game_uid, "lobby_id": lobby_id})
 
 var _queued_op := ""
@@ -101,6 +123,8 @@ func _process(_delta: float) -> void:
 	if _socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
 		_socket = null
 		_authed = false
+		_inflight_id = ""
+		_inflight_op = ""
 		lobby_failed.emit("Connection lost")
 		return
 	if _socket.get_ready_state() == WebSocketPeer.STATE_OPEN and not _authed and _jwt != "":
@@ -199,6 +223,12 @@ func _on_message(message: Dictionary) -> void:
 	if op == "lobby_loading" or str(payload.get("state", "")) == "lobby_loading":
 		lobby_loading.emit()
 		return
+	if op == "peer_joined":
+		peer_joined.emit(str(payload.get("peer_id", "")))
+		return
+	if op == "peer_left":
+		peer_left.emit(str(payload.get("peer_id", "")))
+		return
 	if message.has("ok") and message.get("ok") == true:
 		if _queued_op != "":
 			var op_name := _queued_op
@@ -206,12 +236,33 @@ func _on_message(message: Dictionary) -> void:
 			_queued_op = ""
 			_send(op_name, body)
 			return
-		if payload.has("lobby_id"):
+		var reply_id := str(message.get("id", ""))
+		if reply_id != "" and reply_id == _inflight_id and _inflight_op == "join_lobby":
+			_inflight_id = ""
+			_inflight_op = ""
+			var joined_id := str(payload.get("lobby_id", _pending_join))
+			_announced_join = joined_id
+			lobby_joined.emit(joined_id)
+			seated.emit(_peers(payload))
+			return
+		if reply_id != "" and reply_id == _inflight_id and _inflight_op == "create_lobby":
+			_inflight_id = ""
+			_inflight_op = ""
+			if payload.has("lobby_id"):
+				lobby_created.emit(str(payload["lobby_id"]))
+			seated.emit(_peers(payload))
+			return
+		if payload.has("peers"):
+			seated.emit(_peers(payload))
+	elif op == "joined_lobby":
+		var joined_id := str(payload.get("lobby_id", ""))
+		if joined_id != _announced_join:
+			_announced_join = joined_id
+			lobby_joined.emit(joined_id)
+		seated.emit(_peers(payload))
+	elif op == "seated" or op == "lobby_created" or payload.has("peers"):
+		if op == "lobby_created" and payload.has("lobby_id"):
 			lobby_created.emit(str(payload["lobby_id"]))
-			seated.emit(_peers(payload))
-		elif payload.has("peers"):
-			seated.emit(_peers(payload))
-	elif op == "seated" or op == "lobby_created" or op == "joined_lobby" or payload.has("peers"):
 		seated.emit(_peers(payload))
 	elif message.has("ok") and message.get("ok") == false:
 		var raw_err = message.get("err", {})
@@ -229,6 +280,9 @@ func leave_lobby() -> void:
 	_authed = false
 	_queued_op = ""
 	_queued_payload = {}
+	_inflight_id = ""
+	_inflight_op = ""
+	_announced_join = ""
 
 func _peers(payload: Dictionary) -> Array:
 	var peers = payload.get("peers", [])
@@ -237,9 +291,10 @@ func _peers(payload: Dictionary) -> Array:
 func _send(op: String, payload: Dictionary) -> void:
 	if _socket == null:
 		return
+	var request_id := str(_next_id)
 	var envelope := {
 		"v": 1,
-		"id": str(_next_id),
+		"id": request_id,
 		"ts": Time.get_unix_time_from_system() * 1000,
 		"layer": "data",
 		"op": op,
@@ -247,6 +302,9 @@ func _send(op: String, payload: Dictionary) -> void:
 		"payload": payload,
 	}
 	_next_id += 1
+	if op == "create_lobby" or op == "join_lobby":
+		_inflight_id = request_id
+		_inflight_op = op
 	_socket.send_text(JSON.stringify(envelope))
 
 func _valid_uid(uid: String) -> bool:
