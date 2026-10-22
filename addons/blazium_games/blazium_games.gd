@@ -7,6 +7,7 @@ extends Node
 signal login_url_received(url: String)
 signal logged_in(jwt: String)
 signal login_failed(message: String)
+signal session_expired
 signal steam_signed_in(steam_id: String, token: String)
 signal steam_sign_in_failed(message: String)
 signal bug_reported(bug_uid: String)
@@ -69,6 +70,10 @@ var _socket: WebSocketPeer
 var _sent_getid := false
 var _play_accum := 0.0
 var _reporting := true
+## Seconds to wait for the browser sign-in. 0 waits until the socket closes.
+var login_timeout := 120.0
+var _login_elapsed := 0.0
+var _session_expired_sent := false
 
 func _ready() -> void:
 	add_to_group("blazium_games")
@@ -83,11 +88,23 @@ func start_login() -> void:
 	_reporting = true
 	_play_accum = 0.0
 	_sent_getid = false
+	_login_elapsed = 0.0
+	_session_expired_sent = false
+	if _socket != null:
+		_socket.close()
+		_socket = null
 	_socket = WebSocketPeer.new()
 	_socket.supported_protocols = PackedStringArray(["blazium", game_uid])
 	var err := _socket.connect_to_url(_login_url())
 	if err != OK:
 		login_failed.emit("WebSocket connect failed")
+		_socket = null
+
+func cancel_login() -> void:
+	_login_elapsed = 0.0
+	_sent_getid = false
+	if _socket != null:
+		_socket.close()
 		_socket = null
 
 func _process(delta: float) -> void:
@@ -96,13 +113,24 @@ func _process(delta: float) -> void:
 		return
 	_socket.poll()
 	var state := _socket.get_ready_state()
+	if state == WebSocketPeer.STATE_CLOSED and jwt == "":
+		_socket = null
+		_login_elapsed = 0.0
+		login_failed.emit("Connection closed")
+		return
+	if jwt == "" and login_timeout > 0.0:
+		_login_elapsed += delta
+		if _login_elapsed >= login_timeout:
+			if _socket != null:
+				_socket.close()
+			_socket = null
+			_sent_getid = false
+			_login_elapsed = 0.0
+			login_failed.emit("Sign-in timed out")
+			return
 	if state == WebSocketPeer.STATE_OPEN and not _sent_getid:
 		_socket.send_text('{"action":"getid"}')
 		_sent_getid = true
-	if state == WebSocketPeer.STATE_CLOSED and jwt == "":
-		login_failed.emit("Connection closed")
-		_socket = null
-		return
 	while _socket != null and _socket.get_available_packet_count() > 0:
 		var text := _socket.get_packet().get_string_from_utf8()
 		var parsed = JSON.parse_string(text)
@@ -126,6 +154,8 @@ func _on_message(message: Dictionary) -> void:
 		jwt = token
 		_reporting = true
 		_play_accum = 0.0
+		_login_elapsed = 0.0
+		_session_expired_sent = false
 		user_id = str(message.get("uid", message.get("user_id", "")))
 		_socket.close()
 		_socket = null
@@ -146,6 +176,7 @@ func _tick_playtime(delta: float) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var parsed = JSON.parse_string(raw.get_string_from_utf8())
 		var body = parsed
 		if typeof(parsed) == TYPE_DICTIONARY and typeof(parsed.get("data", null)) == TYPE_DICTIONARY:
@@ -171,6 +202,7 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			steam_sign_in_failed.emit(_error_text(body, "Steam sign-in failed"))
@@ -213,6 +245,7 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var parsed := _data(raw)
 		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
 			bug_report_failed.emit(_error_text(parsed, "Bug report failed"))
@@ -243,6 +276,7 @@ func _bug_notice(method: String, raw_body: String) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			bug_notices_failed.emit(_error_text(body, "Bug notices were refused"))
@@ -307,6 +341,7 @@ func ownership(edition: String = "", listing_uid: String = "") -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			ownership_failed.emit(_error_text(body, "Ownership check failed"))
@@ -324,6 +359,7 @@ func progress() -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			progress_failed.emit(_error_text(body, "Progress read failed"))
@@ -344,6 +380,7 @@ func set_presence(status: String) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		http.queue_free()
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
@@ -373,6 +410,7 @@ func _patch(method: String, raw_body: String) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			patch_notices_failed.emit(_error_text(body, "Patch notes were refused"))
@@ -406,6 +444,7 @@ func _item(path: String, body: Dictionary) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var parsed := _data(raw)
 		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
 			item_failed.emit(_error_text(parsed, "The item action was refused"))
@@ -433,6 +472,7 @@ func record_standard_events(build_id: String, device_uid: String = "plugin", eve
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		if code < 200 or code >= 300:
 			progress_failed.emit(_error_text(_data(raw), "Launch events were refused"))
 		else:
@@ -449,6 +489,7 @@ func apply_lobby_presence(status: String, lobby_id: String, notice_exp: int = 0,
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var body := _data(raw)
 		http.queue_free()
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
@@ -499,6 +540,7 @@ func server_progress(server_key: String, user_uid: String) -> Dictionary:
 	if result.size() < 4:
 		return {"ok": false, "error": "Progress read failed"}
 	var code: int = result[1]
+	_note_http(code)
 	var parsed = _data(result[3])
 	if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
 		return {"ok": false, "error": _error_text(parsed, "Progress read failed")}
@@ -511,6 +553,7 @@ func _server_progress(server_key: String, body: Dictionary) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var parsed := _data(raw)
 		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
 			progress_failed.emit(_error_text(parsed, "Progress write failed"))
@@ -527,6 +570,7 @@ func _progress(body: Dictionary) -> void:
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(_result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		_note_http(code)
 		var parsed := _data(raw)
 		if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY:
 			progress_failed.emit(_error_text(parsed, "Progress write failed"))
@@ -538,6 +582,15 @@ func _progress(body: Dictionary) -> void:
 
 func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
 	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())
+
+func _note_http(code: int) -> void:
+	if code != 401:
+		return
+	_reporting = false
+	if _session_expired_sent:
+		return
+	_session_expired_sent = true
+	session_expired.emit()
 
 func _data(raw: PackedByteArray) -> Variant:
 	var parsed = JSON.parse_string(raw.get_string_from_utf8())

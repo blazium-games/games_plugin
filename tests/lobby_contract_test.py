@@ -54,4 +54,38 @@ assert 'err.get("msg"' in lobby
 assert "/private/library/" in games
 assert "playtime" in games
 assert 'body.get("logged_on"' in games
+
+# Join is its own event. A lobby_id on the reply is not a create.
+assert "signal lobby_joined" in lobby
+assert "signal peer_joined" in lobby
+assert "signal peer_left" in lobby
+assert 'op == "peer_joined"' in lobby
+assert "peer_joined.emit" in lobby
+assert 'op == "peer_left"' in lobby
+assert "peer_left.emit" in lobby
+assert "lobby_joined.emit" in lobby
+assert "_inflight_op" in lobby
+for key in ("password", "name", "max_players", "tags"):
+    assert f'"{key}"' in create, key
+for key in ("password", "name", "max_players"):
+    assert f'"{key}"' in join, key
+handler = lobby.split("func _on_message", 1)[1]
+created_at = handler.index("lobby_created.emit")
+created_window = handler[max(0, created_at - 500):created_at]
+assert "create_lobby" in created_window or 'op == "lobby_created"' in created_window
+join_at = handler.index("lobby_joined.emit")
+join_window = handler[max(0, join_at - 500):join_at]
+assert "join_lobby" in join_window
+
+# Sign-in can be cancelled, times out, drops the previous socket, and reports expiry once.
+assert "signal session_expired" in games
+assert "func cancel_login" in games
+assert 'login_failed.emit("Sign-in timed out")' in games
+assert "session_expired.emit" in games
+start = games.split("func start_login", 1)[1].split("func _process", 1)[0]
+assert "_socket.close()" in start
+assert start.index("_socket.close()") < start.index("WebSocketPeer.new()")
+cancel = games.split("func cancel_login", 1)[1].split("\nfunc ", 1)[0]
+assert "_socket.close()" in cancel
+assert games.count("_note_http(code)") >= games.count("request_completed.connect")
 print("lobby contract ok")
