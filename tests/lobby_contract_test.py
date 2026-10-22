@@ -7,7 +7,7 @@ games = Path("addons/blazium_games/blazium_games.gd").read_text(encoding="utf-8"
 assert '"game_uid": _game_uid' in lobby
 assert '"game_uid": game_uid' in lobby
 assert "join_lobby" in lobby
-assert "HashingContext.HASH_SHA256" in ice
+assert "HashingContext.HASH_SHA256" not in ice
 assert "set_ice_enabled" in ice
 assert "note_lobby" in ice
 assert "hold_ice" in ice
@@ -38,10 +38,16 @@ assert 'replace("-", "+")' in ice
 assert 'replace("_", "/")' in ice
 assert "ice_session_id" in ice
 fetch = ice.split("func fetch_ice", 1)[1].split("func _on_ice", 1)[0]
-assert fetch.index("ice_session_id") < fetch.index("_ice_session")
+assert "_ice_session" not in ice
+assert "ERR_BUSY" in fetch
+assert "STATE_CLOSED" in lobby
+play = games.split("func _tick_playtime", 1)[1].split("func sign_in_with_steam_ticket", 1)[0]
+assert play.index("http.request") < play.index("if err != OK")
+assert "queue_free" in play[play.index("if err != OK"):]
 assert "func leave_lobby" in lobby
 assert '"leave_lobby"' in lobby
-assert lobby.index('"leave_lobby"') < lobby.index("_socket.close()")
+leave = lobby.split("func leave_lobby", 1)[1].split("func _peers", 1)[0]
+assert leave.index('"leave_lobby"') < leave.index("_socket.close()")
 assert 'op == "lobby_created"' in lobby
 assert 'op == "joined_lobby"' in lobby
 assert 'err.get("msg"' in lobby

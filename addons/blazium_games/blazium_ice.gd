@@ -49,11 +49,9 @@ func fetch_ice(jwt: String, _session_id: String) -> void:
 		_deferred_jwt = jwt
 		return
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
-	var session_id := ice_session_id
+	var session_id := _session_id
 	if session_id == "":
-		var user_id := player_id(jwt, get_tree())
-		if user_id != "":
-			session_id = _ice_session(user_id, game_uid)
+		session_id = ice_session_id
 	if not ice_enabled or jwt == "" or session_id == "" or not _valid_uid(game_uid):
 		ice_servers = []
 		ice_denied.emit()
@@ -64,6 +62,8 @@ func fetch_ice(jwt: String, _session_id: String) -> void:
 		_http.request_completed.connect(_on_ice)
 	var url := STUN_ICE + "?game_uid=" + game_uid.uri_encode() + "&session_id=" + session_id.uri_encode()
 	var err := _http.request(url, ["Authorization: Bearer " + jwt])
+	if err == ERR_BUSY:
+		return
 	if err != OK:
 		ice_servers = []
 		ice_denied.emit()
@@ -83,12 +83,6 @@ func _on_ice(result: int, code: int, _headers: PackedStringArray, body: PackedBy
 
 func signal_url() -> String:
 	return TURN_SIGNAL
-
-func _ice_session(user_id: String, game_uid: String) -> String:
-	var ctx := HashingContext.new()
-	ctx.start(HashingContext.HASH_SHA256)
-	ctx.update((user_id.to_lower() + ":" + game_uid.to_lower()).to_utf8_buffer())
-	return ctx.finish().hex_encode()
 
 static func user_from_jwt(token: String) -> String:
 	var parts := token.split(".")
