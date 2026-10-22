@@ -154,7 +154,9 @@ func _tick_playtime(delta: float) -> void:
 			_reporting = false
 		http.queue_free()
 	)
-	http.request(_api() + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
+	var err := http.request(_api() + "/private/library/" + game_uid.uri_encode() + "/playtime", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, JSON.stringify({"seconds": seconds}))
+	if err != OK:
+		http.queue_free()
 
 ## ticket is the hex string from Steamworks GetAuthTicketForWebApi. The identity
 ## must be the ticket secret configured on the listing. This does not link Steamworks.

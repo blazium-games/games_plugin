@@ -85,6 +85,9 @@ func _connect(jwt: String) -> void:
 	_jwt = jwt
 	_game_uid = game_uid
 	_authed = false
+	if _socket != null:
+		_socket.close()
+		_socket = null
 	_socket = WebSocketPeer.new()
 	var err := _socket.connect_to_url(_lobby_url())
 	if err != OK:
@@ -95,6 +98,11 @@ func _process(_delta: float) -> void:
 	if _socket == null:
 		return
 	_socket.poll()
+	if _socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
+		_socket = null
+		_authed = false
+		lobby_failed.emit("Connection lost")
+		return
 	if _socket.get_ready_state() == WebSocketPeer.STATE_OPEN and not _authed and _jwt != "":
 		if _game_uid == "":
 			lobby_failed.emit("blazium/game/game_uid must be the project UUID")
@@ -176,7 +184,8 @@ func _note_ice(result: Dictionary) -> void:
 
 func _on_message(message: Dictionary) -> void:
 	var op := str(message.get("op", ""))
-	var payload: Dictionary = message.get("payload", {})
+	var raw_payload = message.get("payload", {})
+	var payload: Dictionary = raw_payload if typeof(raw_payload) == TYPE_DICTIONARY else {}
 	if op == "presence":
 		var tree := get_tree()
 		if tree != null:
@@ -199,13 +208,14 @@ func _on_message(message: Dictionary) -> void:
 			return
 		if payload.has("lobby_id"):
 			lobby_created.emit(str(payload["lobby_id"]))
-			seated.emit(payload.get("peers", []))
+			seated.emit(_peers(payload))
 		elif payload.has("peers"):
-			seated.emit(payload["peers"])
+			seated.emit(_peers(payload))
 	elif op == "seated" or op == "lobby_created" or op == "joined_lobby" or payload.has("peers"):
-		seated.emit(payload.get("peers", []))
+		seated.emit(_peers(payload))
 	elif message.has("ok") and message.get("ok") == false:
-		var err: Dictionary = message.get("err", {})
+		var raw_err = message.get("err", {})
+		var err: Dictionary = raw_err if typeof(raw_err) == TYPE_DICTIONARY else {}
 		var reason := str(err.get("msg", err.get("message", "")))
 		if reason == "":
 			reason = "Lobby request failed"
@@ -219,6 +229,10 @@ func leave_lobby() -> void:
 	_authed = false
 	_queued_op = ""
 	_queued_payload = {}
+
+func _peers(payload: Dictionary) -> Array:
+	var peers = payload.get("peers", [])
+	return peers if typeof(peers) == TYPE_ARRAY else []
 
 func _send(op: String, payload: Dictionary) -> void:
 	if _socket == null:

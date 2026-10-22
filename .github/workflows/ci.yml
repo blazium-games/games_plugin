@@ -37,6 +37,8 @@ jobs:
           if failed:
               sys.exit(1)
           PY
+      - name: Lobby contract
+        run: python tests/lobby_contract_test.py
       - name: No local paths or library source
         run: |
           python3 - <<'PY'
