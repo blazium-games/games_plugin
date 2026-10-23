@@ -77,6 +77,14 @@ join_at = handler.index("lobby_joined.emit")
 join_window = handler[max(0, join_at - 500):join_at]
 assert "join_lobby" in join_window
 
+plugin = Path("addons/blazium_games/plugin.gd").read_text(encoding="utf-8")
+assert "blazium/discord/application_id" in plugin
+for src in (games, lobby):
+    pin = src.split("func _discord_application_id", 1)[1].split("func _api", 1)[0]
+    assert "blazium/discord/application_id" in pin
+    assert "host_id != configured" in pin
+    assert pin.rfind('return ""') > pin.find("host_id != configured")
+
 # Sign-in can be cancelled, times out, drops the previous socket, and reports expiry once.
 assert "signal session_expired" in games
 assert "func cancel_login" in games
