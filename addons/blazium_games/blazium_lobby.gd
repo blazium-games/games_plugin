@@ -33,7 +33,11 @@ func _discord_application_id() -> String:
 		var c := id.unicode_at(i)
 		if c < 48 or c > 57:
 			return ""
-	return id
+	var host_id := id
+	var configured := str(ProjectSettings.get_setting("blazium/discord/application_id", "")).strip_edges()
+	if configured == "" or host_id != configured:
+		return ""
+	return host_id
 
 func _api() -> String:
 	var id := _discord_application_id()
