@@ -70,6 +70,9 @@ var game_uid: String = ""
 var steam_token: String = ""
 var steam_id: String = ""
 
+## Short-lived tokens by audience ("sapi", "lobby"): {"reply": Dictionary, "until": msec}.
+var _scoped_tokens := {}
+
 var _socket: WebSocketPeer
 var _sent_getid := false
 var _play_accum := 0.0
@@ -89,6 +92,7 @@ func start_login() -> void:
 		return
 	jwt = ""
 	user_id = ""
+	forget_scoped_tokens()
 	_reporting = true
 	_play_accum = 0.0
 	_sent_getid = false
@@ -264,7 +268,7 @@ func report_bug(message: String, client_version: String = "", os_name: String = 
 	])
 	if build_id != "":
 		headers.append("X-Build-Id: " + build_id)
-	http.request(_api() + "/games/" + game_uid.uri_encode() + "/bugs", headers, HTTPClient.METHOD_POST, body)
+	http.request_raw(_api() + "/games/" + game_uid.uri_encode() + "/bugs", headers, HTTPClient.METHOD_POST, body)
 
 func bug_notices() -> void:
 	_bug_notice("GET", "")
@@ -587,9 +591,95 @@ func _progress(body: Dictionary) -> void:
 func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
 	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())
 
+## Asks for a short-lived token for this game only. audience is "sapi" (Scripted API) or "lobby"
+## (create, join and read a lobby). A game never mints a token: it asks, and the service signs one
+## for the signed-in player. The reply is {"ok": true, "token", "audience", "game_uid", "expires_at",
+## "expires_in"} or {"ok": false, "code", "error"}. Use it with await. A token is cached until a
+## minute before it expires. Treat it as a secret: do not log it or save it.
+##
+## A native game asks games_service with its login. A browser game has no login: it asks the play
+## origin that served it (POST /blazium/token), which proves the play session with its own cookie.
+func request_scoped_token(audience: String) -> Dictionary:
+	var want := audience.strip_edges().to_lower()
+	if want != "sapi" and want != "lobby":
+		return _token_failure("bad_audience", "audience must be sapi or lobby")
+	var held = _scoped_tokens.get(want, null)
+	if typeof(held) == TYPE_DICTIONARY and Time.get_ticks_msec() < int(held.get("until", 0)):
+		return held["reply"].duplicate()
+	var url := ""
+	var headers := PackedStringArray(["Content-Type: application/json"])
+	var body := ""
+	if jwt != "":
+		if not _valid_uid(game_uid):
+			return _token_failure("bad_request", "blazium/game/game_uid must be the project UUID")
+		url = _api() + "/private/games/" + game_uid.uri_encode() + "/tokens"
+		headers.append("Authorization: Bearer " + jwt)
+		body = JSON.stringify({"audience": want})
+	elif OS.get_name() == "Web":
+		url = _web_token_url()
+		if url == "":
+			return _token_failure("no_host", "this page cannot ask for a token")
+		body = JSON.stringify({"audience": want})
+	else:
+		return _token_failure("not_logged_on", "sign in before asking for a token")
+	if not is_inside_tree():
+		return _token_failure("no_host", "the Blazium node is not in the scene tree")
+	var http := HTTPRequest.new()
+	http.timeout = 15.0
+	add_child(http)
+	var err := http.request(url, headers, HTTPClient.METHOD_POST, body)
+	if err != OK:
+		http.queue_free()
+		return _token_failure("service_unavailable", "the token request could not be sent")
+	var result: Array = await http.request_completed
+	http.queue_free()
+	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
+		return _token_failure("service_unavailable", "the token service could not be reached")
+	var code: int = result[1]
+	var parsed = JSON.parse_string((result[3] as PackedByteArray).get_string_from_utf8())
+	if code == 401:
+		_note_http(code)
+	if code < 200 or code >= 300 or typeof(parsed) != TYPE_DICTIONARY or str(parsed.get("token", "")) == "":
+		var key := "http_%d" % code
+		if typeof(parsed) == TYPE_DICTIONARY and str(parsed.get("code", "")) != "":
+			key = str(parsed["code"])
+		return _token_failure(key, _error_text(parsed, "the token was refused"))
+	var seconds := int(parsed.get("expires_in", 0))
+	var reply := {
+		"ok": true,
+		"token": str(parsed["token"]),
+		"audience": want,
+		"game_uid": str(parsed.get("game_uid", game_uid)),
+		"expires_at": str(parsed.get("expires_at", "")),
+		"expires_in": seconds,
+	}
+	var margin := 60 if seconds > 120 else int(seconds / 2.0)
+	_scoped_tokens[want] = {"reply": reply, "until": Time.get_ticks_msec() + maxi(0, seconds - margin) * 1000}
+	return reply.duplicate()
+
+## Drops every cached token, so the next request asks again. Done on sign-in and after a 401.
+func forget_scoped_tokens() -> void:
+	_scoped_tokens.clear()
+
+func _token_failure(code: String, message: String) -> Dictionary:
+	return {"ok": false, "code": code, "error": message}
+
+func _web_token_url() -> String:
+	var bridge = Engine.get_singleton("JavaScriptBridge")
+	if bridge == null:
+		return ""
+	var id := _discord_application_id()
+	if id != "":
+		return "https://%s.discordsays.com/.proxy/blazium/token" % id
+	var origin := str(bridge.eval("window.location.origin", true))
+	if not origin.begins_with("https://"):
+		return ""
+	return origin + "/blazium/token"
+
 func _note_http(code: int) -> void:
 	if code != 401:
 		return
+	forget_scoped_tokens()
 	_reporting = false
 	if _session_expired_sent:
 		return

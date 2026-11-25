@@ -10,6 +10,19 @@ Download `blazium_games-<version>.zip` from [Releases](https://github.com/blaziu
 
 The long guide is [Engines](https://docs.blazium.games/docs/engines).
 
+## Scripted API
+
+`BlaziumSapi.invoke(logic, args, opts)` calls `https://sapi.blazium.online/v1/{game_uid}/{logic}` (`call_logic` is kept as an alias). Results come on `call_completed` and `call_failed`. A signed-in call sends a short-lived token for this game that `BlaziumGames.request_scoped_token("sapi")` asked for; the login token is never sent. A native game asks games_service with its login. A browser game has no login, so it asks the play origin that served it with `POST /blazium/token`. A 429 or 503 is retried with the same `Idempotency-Key`, and a 401 asks for a fresh token once. Pass `{"anonymous": true}` for logic marked `auth = anonymous`.
+
+```gdscript
+var reply: Dictionary = await $BlaziumGames.request_scoped_token("lobby")
+if reply.ok:
+    lobby.create_lobby(reply.token, "public")  # a lobby token works for create, join and read only
+$BlaziumSapi.invoke("score_submit", {"score": 10})
+```
+
+A token lasts minutes, is cached until a minute before it ends, and is dropped on sign-in and on a 401. Never log or save one.
+
 ## Platform
 
 - Docs: [docs.blazium.games](https://docs.blazium.games) and the map [llms.txt](https://docs.blazium.games/llms.txt)

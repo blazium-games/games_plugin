@@ -2,7 +2,9 @@ class_name BlaziumSapi
 extends Node
 
 ## Calls this game's Scripted API logic at https://sapi.blazium.online/v1/{game_uid}/{logic}.
-## Signed-in calls use the BlaziumGames session; logic marked auth = anonymous works without one.
+## Signed-in calls send a short-lived token for this game, requested from BlaziumGames.request_scoped_token
+## (a native game asks with its login, a browser game asks the play origin). The login token is never sent.
+## Logic marked auth = anonymous works without one.
 
 signal call_completed(logic: String, status: int, body: Variant, request_id: String)
 signal call_failed(logic: String, status: int, error_key: String, message: String, request_id: String)
@@ -53,7 +55,11 @@ func _base() -> String:
 		return "https://%s.discordsays.com/.proxy/blazium/sapi" % id
 	return SAPI
 
-func _session_token() -> String:
+## The Authorization token for one attempt, or "" when there is none. A Steam session sends its own
+## token. Otherwise the BlaziumGames node asks for a short-lived token for this game: this class
+## never reads or sends the login token.
+func _bearer(req: Dictionary) -> String:
+	req["scoped"] = false
 	if not is_inside_tree():
 		return ""
 	var games := get_tree().get_first_node_in_group("blazium_games")
@@ -62,9 +68,20 @@ func _session_token() -> String:
 	var steam := str(games.get("steam_token"))
 	if steam != "" and steam != "<null>":
 		return steam
-	var jwt := str(games.get("jwt"))
-	return "" if jwt == "<null>" else jwt
+	if not games.has_method("request_scoped_token"):
+		return ""
+	var reply: Dictionary = await games.request_scoped_token("sapi")
+	if not bool(reply.get("ok", false)):
+		return ""
+	req["scoped"] = true
+	return str(reply.get("token", ""))
 
+func _forget_tokens() -> void:
+	if not is_inside_tree():
+		return
+	var games := get_tree().get_first_node_in_group("blazium_games")
+	if games != null and games.has_method("forget_scoped_tokens"):
+		games.forget_scoped_tokens()
 func _channel() -> String:
 	var ch := channel.strip_edges().to_lower()
 	if ch == "":
@@ -86,9 +103,9 @@ static func _new_key() -> String:
 	return crypto.generate_random_bytes(16).hex_encode()
 
 ## Runs one logic. args is sent as the JSON body (or the query string for GET).
-## opts: method ("POST" default, "GET", "PUT", "PATCH", "DELETE"), anonymous (bool, skip the session),
+## opts: method ("POST" default, "GET", "PUT", "PATCH", "DELETE"), anonymous (bool, send no token),
 ## idempotency_key (String; a non-GET call gets one so retries apply once), channel (String).
-func call_logic(logic: String, args: Dictionary = {}, opts: Dictionary = {}) -> void:
+func invoke(logic: String, args: Dictionary = {}, opts: Dictionary = {}) -> void:
 	if not _valid_logic(logic):
 		call_failed.emit(logic, 0, "bad_request", "logic names are lowercase letters, digits, _ and -", "")
 		return
@@ -117,16 +134,24 @@ func call_logic(logic: String, args: Dictionary = {}, opts: Dictionary = {}) -> 
 			return
 	var headers := PackedStringArray(["Content-Type: application/json", "Accept: application/json"])
 	headers.append("X-Blazium-Channel: " + str(opts.get("channel", _channel())))
-	if not bool(opts.get("anonymous", false)):
-		var token := _session_token()
-		if token != "":
-			headers.append("Authorization: Bearer " + token)
 	if method != "GET":
 		var key := str(opts.get("idempotency_key", ""))
 		headers.append("Idempotency-Key: " + (key if key != "" else _new_key()))
-	_send(logic, url, headers, verbs[method], body, 0)
+	# The token is added per attempt in _send, so a retry gets a fresh one and keeps the other headers.
+	var req := {"logic": logic, "url": url, "headers": headers, "verb": verbs[method], "body": body, "anonymous": bool(opts.get("anonymous", false)), "scoped": false, "refreshed": false}
+	_send(req, 0)
 
-func _send(logic: String, url: String, headers: PackedStringArray, verb: int, body: String, attempt: int) -> void:
+## Same as invoke. Kept for projects written against the first release.
+func call_logic(logic: String, args: Dictionary = {}, opts: Dictionary = {}) -> void:
+	invoke(logic, args, opts)
+
+func _send(req: Dictionary, attempt: int) -> void:
+	var logic: String = req["logic"]
+	var headers: PackedStringArray = (req["headers"] as PackedStringArray).duplicate()
+	if not bool(req["anonymous"]):
+		var token := await _bearer(req)
+		if token != "":
+			headers.append("Authorization: Bearer " + token)
 	var http := HTTPRequest.new()
 	http.timeout = timeout
 	add_child(http)
@@ -135,12 +160,19 @@ func _send(logic: String, url: String, headers: PackedStringArray, verb: int, bo
 		var request_id := _header(reply_headers, "x-request-id")
 		if result != HTTPRequest.RESULT_SUCCESS:
 			if attempt < max_retries:
-				_retry(logic, url, headers, verb, body, attempt, 0.0)
+				_retry(req, attempt, 0.0)
+
 			else:
 				call_failed.emit(logic, 0, "service_unavailable", "the Scripted API could not be reached", request_id)
 			return
+		if code == 401 and bool(req["scoped"]) and not bool(req["refreshed"]):
+			# The token may have been revoked or aged out early. Ask once more.
+			req["refreshed"] = true
+			_forget_tokens()
+			_send(req, attempt)
+			return
 		if (code == 429 or code == 503) and attempt < max_retries:
-			_retry(logic, url, headers, verb, body, attempt, _header(reply_headers, "retry-after").to_float())
+			_retry(req, attempt, _header(reply_headers, "retry-after").to_float())
 			return
 		var text := raw.get_string_from_utf8()
 		var parsed = JSON.parse_string(text) if text != "" else null
@@ -154,15 +186,15 @@ func _send(logic: String, url: String, headers: PackedStringArray, verb: int, bo
 			message = str(parsed["error"].get("message", message))
 		call_failed.emit(logic, code, key, message, request_id)
 	)
-	var err := http.request(url, headers, verb, body)
+	var err := http.request(str(req["url"]), headers, int(req["verb"]), str(req["body"]))
 	if err != OK:
 		http.queue_free()
 		call_failed.emit(logic, 0, "bad_request", "the request could not be sent", "")
 
-func _retry(logic: String, url: String, headers: PackedStringArray, verb: int, body: String, attempt: int, retry_after: float) -> void:
+func _retry(req: Dictionary, attempt: int, retry_after: float) -> void:
 	var wait := retry_after if retry_after > 0.0 else 0.5 * pow(2.0, attempt)
 	await get_tree().create_timer(minf(wait, 8.0)).timeout
-	_send(logic, url, headers, verb, body, attempt + 1)
+	_send(req, attempt + 1)
 
 static func _header(headers: PackedStringArray, name: String) -> String:
 	for h in headers:
@@ -179,4 +211,4 @@ func get_public_config() -> void:
 		call_failed.emit("_config", 0, "bad_request", "blazium/game/game_uid is not set", "")
 		return
 	var url := _base() + "/v1/" + _game_uid.uri_encode() + "/_config?channel=" + _channel().uri_encode()
-	_send("_config", url, PackedStringArray(["Accept: application/json"]), HTTPClient.METHOD_GET, "", 0)
+	_send({"logic": "_config", "url": url, "headers": PackedStringArray(["Accept: application/json"]), "verb": HTTPClient.METHOD_GET, "body": "", "anonymous": true, "scoped": false, "refreshed": false}, 0)
