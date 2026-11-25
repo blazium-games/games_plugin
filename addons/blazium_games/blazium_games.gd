@@ -5,6 +5,12 @@ extends Node
 ## Lobby and ICE use that token on their own connections.
 
 signal login_url_received(url: String)
+## A console or TV can show this code and verification_url instead of a link. The player types the code at that address.
+signal login_code_received(user_code: String, verification_url: String)
+## The player signed in but still has to finish a step on the website (terms, setup, authenticator). The socket stays open and logged_in follows.
+signal login_pending(gate: String)
+signal session_refreshed(jwt: String)
+signal logged_out
 signal logged_in(jwt: String)
 signal login_failed(message: String)
 signal session_expired
@@ -117,6 +123,7 @@ func cancel_login() -> void:
 
 func _process(delta: float) -> void:
 	_tick_playtime(delta)
+	_tick_refresh(delta)
 	if _socket == null:
 		return
 	_socket.poll()
@@ -154,6 +161,11 @@ func _on_message(message: Dictionary) -> void:
 		var url := str(message.get("login_url", message.get("url", "")))
 		if url != "":
 			login_url_received.emit(url)
+		var code := str(message.get("user_code", ""))
+		if code != "":
+			login_code_received.emit(code, str(message.get("verification_url", "")))
+	elif action == "login_pending":
+		login_pending.emit(str(message.get("gate", "")))
 	elif action == "jwt" or action == "login_success":
 		var token := str(message.get("jwt", message.get("token", "")))
 		if token == "":
@@ -167,9 +179,185 @@ func _on_message(message: Dictionary) -> void:
 		user_id = str(message.get("uid", message.get("user_id", "")))
 		_socket.close()
 		_socket = null
+		_save_session()
 		logged_in.emit(jwt)
 	elif action == "error":
 		login_failed.emit(str(message.get("message", "Login failed")))
+
+## ---- Session for a player who signed in without the launcher -------------------------------------
+##
+## The launcher keeps a session fresh for a game it started. A game with no launcher keeps its own:
+## it refreshes the login before it expires, can remember it between runs, and signs out.
+
+## Remember the login between runs. Off by default. The file is in the game's own user directory and is
+## encrypted with a key made from the game and the device, which keeps a casual copy from working
+## elsewhere. It is not a vault: on a platform with a secure store, keep the token there instead and
+## call restore_session_from(token).
+var persist_session := false
+## Refresh when this many seconds are left. The service accepts a refresh at any time while the login is live.
+var refresh_margin := 24 * 3600
+const SESSION_FILE := "user://blazium_session.dat"
+var _refresh_clock := 0.0
+var _refreshing := false
+
+## Seconds since 1970 when the current login token expires, or 0 when there is none.
+func session_expiry() -> int:
+	if jwt == "":
+		return 0
+	var parts := jwt.split(".")
+	if parts.size() != 3:
+		return 0
+	var raw := parts[1].replace("-", "+").replace("_", "/")
+	while raw.length() % 4 != 0:
+		raw += "="
+	var parsed = JSON.parse_string(Marshalls.base64_to_raw(raw).get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return 0
+	return int(parsed.get("exp", 0))
+
+func is_signed_in() -> bool:
+	var exp := session_expiry()
+	return jwt != "" and exp > int(Time.get_unix_time_from_system())
+
+func _tick_refresh(delta: float) -> void:
+	if jwt == "" or _refreshing:
+		return
+	_refresh_clock += delta
+	if _refresh_clock < 300.0:
+		return
+	_refresh_clock = 0.0
+	var left := session_expiry() - int(Time.get_unix_time_from_system())
+	if left > 0 and left <= refresh_margin:
+		refresh_session()
+
+## Asks for a new login token before the current one expires. Returns true when it worked. A refusal
+## because the login is over emits session_expired. Use it with await, or watch session_refreshed.
+func refresh_session() -> bool:
+	if jwt == "" or _refreshing or not is_inside_tree():
+		return false
+	_refreshing = true
+	var http := HTTPRequest.new()
+	http.timeout = 15.0
+	add_child(http)
+	var err := http.request(_api() + "/public/token/refresh", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_POST)
+	if err != OK:
+		http.queue_free()
+		_refreshing = false
+		return false
+	var result: Array = await http.request_completed
+	http.queue_free()
+	_refreshing = false
+	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
+		return false
+	var code: int = result[1]
+	_note_http(code)
+	var body = _data(result[3])
+	if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY or str(body.get("token", "")) == "":
+		return false
+	jwt = str(body["token"])
+	# The old login id is gone, so tokens made from it are too.
+	forget_scoped_tokens()
+	_save_session()
+	session_refreshed.emit(jwt)
+	return true
+
+## Uses a login token the game kept elsewhere (a platform secure store, for example). If it is
+## close to expiry it is refreshed first. Emits logged_in on success, login_failed otherwise.
+func restore_session_from(token: String) -> void:
+	jwt = token.strip_edges()
+	_session_expired_sent = false
+	var left := session_expiry() - int(Time.get_unix_time_from_system())
+	if jwt == "" or left <= 0:
+		jwt = ""
+		login_failed.emit("The saved sign-in has expired")
+		return
+	var ok := true
+	if left <= refresh_margin:
+		ok = await refresh_session()
+	if not ok and session_expiry() <= int(Time.get_unix_time_from_system()):
+		jwt = ""
+		login_failed.emit("The saved sign-in could not be renewed")
+		return
+	_reporting = true
+	logged_in.emit(jwt)
+
+## Reads the login saved by an earlier run when persist_session is on. Emits logged_in or login_failed.
+func restore_session() -> void:
+	if not persist_session:
+		login_failed.emit("Saved sign-ins are off")
+		return
+	var token := _load_session()
+	if token == "":
+		login_failed.emit("No saved sign-in")
+		return
+	await restore_session_from(token)
+
+## Signs out: the service ends this login, and the saved copy and cached tokens are dropped.
+func logout() -> void:
+	var token := jwt
+	jwt = ""
+	user_id = ""
+	steam_token = ""
+	forget_scoped_tokens()
+	_forget_saved_session()
+	_reporting = false
+	if token != "" and is_inside_tree():
+		var http := HTTPRequest.new()
+		http.timeout = 10.0
+		add_child(http)
+		if http.request(_api() + "/private/logout", ["Authorization: Bearer " + token], HTTPClient.METHOD_POST) == OK:
+			await http.request_completed
+		http.queue_free()
+	logged_out.emit()
+
+func _session_key() -> String:
+	var device := OS.get_unique_id() if OS.get_name() != "Web" else ""
+	return ("blazium-session|" + game_uid + "|" + device).sha256_text()
+
+func _save_session() -> void:
+	if not persist_session or jwt == "":
+		return
+	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.WRITE, _session_key())
+	if file == null:
+		return
+	file.store_string(jwt)
+	file.close()
+
+func _load_session() -> String:
+	if not FileAccess.file_exists(SESSION_FILE):
+		return ""
+	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.READ, _session_key())
+	if file == null:
+		return ""
+	var text := file.get_as_text()
+	file.close()
+	return text.strip_edges()
+
+func _forget_saved_session() -> void:
+	if FileAccess.file_exists(SESSION_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(SESSION_FILE))
+
+## Asks for the chat sign-in details (host, port, nick and a ten minute password) for the Blazium IRC
+## server. Use it with await. It needs a login. The reply is the service's fields, or {"ok": false, "error"}.
+func request_chat_token() -> Dictionary:
+	if jwt == "" or not is_inside_tree():
+		return {"ok": false, "error": "sign in before asking for chat access"}
+	var http := HTTPRequest.new()
+	http.timeout = 15.0
+	add_child(http)
+	if http.request(_api() + "/private/irc/token", ["Authorization: Bearer " + jwt, "Content-Type: application/json"], HTTPClient.METHOD_POST, "{}") != OK:
+		http.queue_free()
+		return {"ok": false, "error": "the chat request could not be sent"}
+	var result: Array = await http.request_completed
+	http.queue_free()
+	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
+		return {"ok": false, "error": "the chat service could not be reached"}
+	var code: int = result[1]
+	_note_http(code)
+	var body = _data(result[3])
+	if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
+		return {"ok": false, "error": _error_text(body, "chat access was refused")}
+	return body
 
 func _tick_playtime(delta: float) -> void:
 	if jwt == "" or not _reporting or not _valid_uid(game_uid):
@@ -591,8 +779,9 @@ func _progress(body: Dictionary) -> void:
 func _part(body: PackedByteArray, boundary: String, name: String, value: String) -> void:
 	body.append_array(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % [boundary, name, value]).to_utf8_buffer())
 
-## Asks for a short-lived token for this game only. audience is "sapi" (Scripted API) or "lobby"
-## (create, join and read a lobby). A game never mints a token: it asks, and the service signs one
+## Asks for a short-lived token for this game only. audience is "sapi" (Scripted API), "lobby"
+## (create, join and read a lobby) or "server" (proof of who the player is, handed to the game's own
+## server, which checks it once with its server key). A game never mints a token: it asks, and the service signs one
 ## for the signed-in player. The reply is {"ok": true, "token", "audience", "game_uid", "expires_at",
 ## "expires_in"} or {"ok": false, "code", "error"}. Use it with await. A token is cached until a
 ## minute before it expires. Treat it as a secret: do not log it or save it.
@@ -601,8 +790,8 @@ func _part(body: PackedByteArray, boundary: String, name: String, value: String)
 ## origin that served it (POST /blazium/token), which proves the play session with its own cookie.
 func request_scoped_token(audience: String) -> Dictionary:
 	var want := audience.strip_edges().to_lower()
-	if want != "sapi" and want != "lobby":
-		return _token_failure("bad_audience", "audience must be sapi or lobby")
+	if want != "sapi" and want != "lobby" and want != "server":
+		return _token_failure("bad_audience", "audience must be sapi, lobby or server")
 	var held = _scoped_tokens.get(want, null)
 	if typeof(held) == TYPE_DICTIONARY and Time.get_ticks_msec() < int(held.get("until", 0)):
 		return held["reply"].duplicate()
@@ -615,6 +804,11 @@ func request_scoped_token(audience: String) -> Dictionary:
 		url = _api() + "/private/games/" + game_uid.uri_encode() + "/tokens"
 		headers.append("Authorization: Bearer " + jwt)
 		body = JSON.stringify({"audience": want})
+	elif steam_token != "" and _valid_uid(game_uid):
+		# A Steam-only player has no Blazium login. The Steam session asks for the same short-lived token
+		# once the Steam account is linked to a Blazium account (the service says so if it is not).
+		url = _api() + "/steam/" + game_uid.uri_encode() + "/tokens"
+		body = JSON.stringify({"token": steam_token, "audience": want})
 	elif OS.get_name() == "Web":
 		url = _web_token_url()
 		if url == "":

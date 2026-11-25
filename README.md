@@ -23,6 +23,12 @@ $BlaziumSapi.invoke("score_submit", {"score": 10})
 
 A token lasts minutes, is cached until a minute before it ends, and is dropped on sign-in and on a 401. Never log or save one.
 
+## Player sign-in outside the launcher
+
+`BlaziumGames.start_login()` works in a game that is not started by the launcher: it asks `login.blazium.online` for a link and a short code, and emits `login_url_received(url)` and `login_code_received(user_code, verification_url)` (show the code on a console or TV, or the link as a QR code). `login_pending(gate)` means the website still has a step for the player; `login_failed(message)` and `session_expired` report the rest. `cancel_login()` stops waiting.
+
+The addon renews the session before it ends (`refresh_session()`, signal `session_refreshed(jwt)`), saves it so `restore_session()` signs a returning player in again (`restore_session_from(token)` if your game keeps the token itself), and `logout()` forgets it. The saved copy is a file in `user://` and is not encrypted, so on a console keep the token in protected storage and use `restore_session_from`. `request_chat_token()` returns the host, port and a short-lived password for the Blazium IRC server. Scoped tokens from `request_scoped_token` are dropped whenever the session changes. The repo's `tests/*_contract_test.py` check the call shapes; the sign-in flow has not been run in a Godot editor or on a console from this repo.
+
 ## Platform
 
 - Docs: [docs.blazium.games](https://docs.blazium.games) and the map [llms.txt](https://docs.blazium.games/llms.txt)
