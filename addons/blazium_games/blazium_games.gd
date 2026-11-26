@@ -91,6 +91,7 @@ var _session_expired_sent := false
 func _ready() -> void:
 	add_to_group("blazium_games")
 	game_uid = str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	_forget_legacy_session_file()
 
 func start_login() -> void:
 	if not _valid_uid(game_uid):
@@ -189,14 +190,21 @@ func _on_message(message: Dictionary) -> void:
 ## The launcher keeps a session fresh for a game it started. A game with no launcher keeps its own:
 ## it refreshes the login before it expires, can remember it between runs, and signs out.
 
-## Remember the login between runs. Off by default. The file is in the game's own user directory and is
-## encrypted with a key made from the game and the device, which keeps a casual copy from working
-## elsewhere. It is not a vault: on a platform with a secure store, keep the token there instead and
-## call restore_session_from(token).
+## Remember the login between runs. Off by default. The login token is kept only in the operating
+## system's credential store: the Secret Service keyring (secret-tool) on Linux and BSD, the login
+## keychain on macOS, and DPAPI for the current user on Windows. Where no such store is reachable (web,
+## Android, iOS, consoles, or a desktop without one) nothing is saved: keep the token in the platform's
+## secure storage yourself and call restore_session_from(token).
 var persist_session := false
 ## Refresh when this many seconds are left. The service accepts a refresh at any time while the login is live.
 var refresh_margin := 24 * 3600
-const SESSION_FILE := "user://blazium_session.dat"
+## Written by earlier versions with a key anyone holding the game could rebuild. Never read, only deleted.
+const LEGACY_SESSION_FILE := "user://blazium_session.dat"
+## Windows only: the login token sealed with DPAPI for the current user and this game.
+const SESSION_DPAPI_FILE := "user://blazium_session.dpapi"
+const SESSION_SERVICE := "blazium-games"
+const KEYCHAIN_TOOL := "/usr/bin/security"
+const CREDENTIAL_TOOL_TIMEOUT_MSEC := 15000
 var _refresh_clock := 0.0
 var _refreshing := false
 
@@ -310,32 +318,130 @@ func logout() -> void:
 		http.queue_free()
 	logged_out.emit()
 
-func _session_key() -> String:
-	var device := OS.get_unique_id() if OS.get_name() != "Web" else ""
-	return ("blazium-session|" + game_uid + "|" + device).sha256_text()
+## Which credential store holds the saved login here: "secret-tool", "keychain", "dpapi", or "" for none.
+func _session_store() -> String:
+	if not _valid_uid(game_uid):
+		return ""
+	if OS.has_feature("linuxbsd"):
+		return "secret-tool" if _secret_tool() != "" else ""
+	if OS.get_name() == "macOS":
+		return "keychain" if FileAccess.file_exists(KEYCHAIN_TOOL) else ""
+	if OS.get_name() == "Windows":
+		return "dpapi" if _powershell() != "" else ""
+	return ""
+
+func _secret_tool() -> String:
+	# OS.execute with output runs through sh on Unix, so only plain directories are accepted.
+	var plain := RegEx.new()
+	plain.compile("^/[A-Za-z0-9._/+-]*$")
+	for dir in OS.get_environment("PATH").split(":", false):
+		if plain.search(dir) == null:
+			continue
+		var path := dir.path_join("secret-tool")
+		if FileAccess.file_exists(path):
+			return path
+	return ""
+
+func _powershell() -> String:
+	var root := OS.get_environment("SystemRoot")
+	if root == "" or not root.is_absolute_path():
+		return ""
+	var path := root.trim_suffix("\\") + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+	return path if FileAccess.file_exists(path) else ""
+
+## A login token is a JWT. Anything else is neither stored nor accepted back from a store.
+func _storable_token(token: String) -> bool:
+	var re := RegEx.new()
+	re.compile("^[A-Za-z0-9_.-]{1,16384}$")
+	return re.search(token) != null
+
+func _ps_literal(text: String) -> String:
+	for quote in ["'", "\u2018", "\u2019", "\u201A", "\u201B"]:
+		text = text.replace(quote, quote + quote)
+	return "'" + text + "'"
+
+func _ps_args(script: String) -> PackedStringArray:
+	var full := "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';Add-Type -AssemblyName System.Security;" + script
+	return PackedStringArray(["-NoProfile", "-NonInteractive", "-EncodedCommand", Marshalls.raw_to_base64(full.to_utf16_buffer())])
+
+func _dpapi_entropy() -> String:
+	return "[Text.Encoding]::UTF8.GetBytes(%s)" % _ps_literal("blazium-session|" + game_uid)
+
+## Hands secret to a credential tool on its stdin, so it never appears in a command line.
+func _pipe_secret(path: String, args: PackedStringArray, secret: String) -> bool:
+	var proc := OS.execute_with_pipe(path, args)
+	if proc.is_empty():
+		return false
+	var stdio: FileAccess = proc["stdio"]
+	stdio.store_string(secret)
+	stdio.close()
+	var pid: int = proc["pid"]
+	var deadline := Time.get_ticks_msec() + CREDENTIAL_TOOL_TIMEOUT_MSEC
+	var ok := true
+	while OS.is_process_running(pid):
+		if Time.get_ticks_msec() > deadline:
+			OS.kill(pid)
+			ok = false
+			break
+		OS.delay_msec(10)
+	var stderr = proc.get("stderr", null)
+	if stderr is FileAccess:
+		stderr.close()
+	return ok and OS.get_process_exit_code(pid) == 0
 
 func _save_session() -> void:
-	if not persist_session or jwt == "":
+	_forget_legacy_session_file()
+	if not persist_session or jwt == "" or not _storable_token(jwt):
 		return
-	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.WRITE, _session_key())
-	if file == null:
-		return
-	file.store_string(jwt)
-	file.close()
+	match _session_store():
+		"secret-tool":
+			_pipe_secret(_secret_tool(), PackedStringArray(["store", "--label=Blazium Games sign-in", "service", SESSION_SERVICE, "game", game_uid]), jwt)
+		"keychain":
+			# Interactive mode reads the command from stdin. game_uid and the token are checked to hold no spaces or quotes.
+			_pipe_secret(KEYCHAIN_TOOL, PackedStringArray(["-i"]), "add-generic-password -U -s %s -a %s -w %s\n" % [SESSION_SERVICE, game_uid, jwt])
+		"dpapi":
+			var target := _ps_literal(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+			_pipe_secret(_powershell(), _ps_args(
+				"$t=[Console]::In.ReadToEnd().Trim();" +
+				"$b=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($t)," + _dpapi_entropy() + ",[Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+				"[IO.File]::WriteAllText(" + target + ",[Convert]::ToBase64String($b))"
+			), jwt)
 
 func _load_session() -> String:
-	if not FileAccess.file_exists(SESSION_FILE):
+	_forget_legacy_session_file()
+	var out := []
+	var code := -1
+	match _session_store():
+		"secret-tool":
+			code = OS.execute(_secret_tool(), PackedStringArray(["lookup", "service", SESSION_SERVICE, "game", game_uid]), out)
+		"keychain":
+			code = OS.execute(KEYCHAIN_TOOL, PackedStringArray(["find-generic-password", "-s", SESSION_SERVICE, "-a", game_uid, "-w"]), out)
+		"dpapi":
+			if not FileAccess.file_exists(SESSION_DPAPI_FILE):
+				return ""
+			var source := _ps_literal(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+			code = OS.execute(_powershell(), _ps_args(
+				"$b=[Convert]::FromBase64String([IO.File]::ReadAllText(" + source + ").Trim());" +
+				"[Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b," + _dpapi_entropy() + ",[Security.Cryptography.DataProtectionScope]::CurrentUser)))"
+			), out)
+	if code != 0 or out.is_empty():
 		return ""
-	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.READ, _session_key())
-	if file == null:
-		return ""
-	var text := file.get_as_text()
-	file.close()
-	return text.strip_edges()
+	var token := str(out[0]).strip_edges()
+	return token if _storable_token(token) else ""
 
 func _forget_saved_session() -> void:
-	if FileAccess.file_exists(SESSION_FILE):
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(SESSION_FILE))
+	_forget_legacy_session_file()
+	match _session_store():
+		"secret-tool":
+			OS.execute(_secret_tool(), PackedStringArray(["clear", "service", SESSION_SERVICE, "game", game_uid]), [])
+		"keychain":
+			OS.execute(KEYCHAIN_TOOL, PackedStringArray(["delete-generic-password", "-s", SESSION_SERVICE, "-a", game_uid]), [])
+	if FileAccess.file_exists(SESSION_DPAPI_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+
+func _forget_legacy_session_file() -> void:
+	if FileAccess.file_exists(LEGACY_SESSION_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SESSION_FILE))
 
 ## Asks for the chat sign-in details (host, port, nick and a ten minute password) for the Blazium IRC
 ## server. Use it with await. It needs a login. The reply is the service's fields, or {"ok": false, "error"}.
