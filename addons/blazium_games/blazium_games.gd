@@ -78,6 +78,12 @@ var steam_id: String = ""
 
 ## Short-lived tokens by audience ("sapi", "lobby"): {"reply": Dictionary, "until": msec}.
 var _scoped_tokens := {}
+## Bumped whenever the Blazium login, the Steam session, or the scoped-token cache is replaced or
+## dropped. A network call records them when it starts and discards its reply if they changed, so
+## a reply for a player who signed out, or was replaced, never becomes the current session.
+var _login_gen := 0
+var _steam_gen := 0
+var _scoped_gen := 0
 
 var _socket: WebSocketPeer
 var _sent_getid := false
@@ -88,16 +94,42 @@ var login_timeout := 120.0
 var _login_elapsed := 0.0
 var _session_expired_sent := false
 
+## Changes whenever the signed-in account may change (sign-out, a new sign-in, a restore). It is shared
+## by every node in the process: lobby and ICE nodes record it when they are admitted and drop the
+## socket, admit ticket and relay servers they hold once it moves on.
+static var session_epoch := 0
+
 func _ready() -> void:
 	add_to_group("blazium_games")
 	game_uid = str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
+	_forget_legacy_session_file()
+
+## Ends everything the previous account opened through the other nodes. Runs before anything else in
+## logout, start_login and restore, so a lobby or relay list cannot outlive the login it was made with.
+func _end_account_session() -> void:
+	session_epoch += 1
+	forget_scoped_tokens()
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.call_group("blazium_lobby", "forget_session")
+	tree.call_group("blazium_ice", "forget_session")
+
+## Forgets the Steam session of the previous player; a Steam reply still in flight is dropped.
+func _drop_steam_session() -> void:
+	_steam_gen += 1
+	steam_token = ""
+	steam_id = ""
 
 func start_login() -> void:
+	_end_account_session()
 	if not _valid_uid(game_uid):
 		login_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
 	jwt = ""
 	user_id = ""
+	_drop_steam_session()
+	_new_login_session()
 	forget_scoped_tokens()
 	_reporting = true
 	_play_accum = 0.0
@@ -171,6 +203,8 @@ func _on_message(message: Dictionary) -> void:
 		if token == "":
 			login_failed.emit("Login response had no token")
 			return
+	_new_login_session()
+	_end_account_session()
 		jwt = token
 		_reporting = true
 		_play_accum = 0.0
@@ -189,14 +223,21 @@ func _on_message(message: Dictionary) -> void:
 ## The launcher keeps a session fresh for a game it started. A game with no launcher keeps its own:
 ## it refreshes the login before it expires, can remember it between runs, and signs out.
 
-## Remember the login between runs. Off by default. The file is in the game's own user directory and is
-## encrypted with a key made from the game and the device, which keeps a casual copy from working
-## elsewhere. It is not a vault: on a platform with a secure store, keep the token there instead and
-## call restore_session_from(token).
+## Remember the login between runs. Off by default. The login token is kept only in the operating
+## system's credential store: the Secret Service keyring (secret-tool) on Linux and BSD, the login
+## keychain on macOS, and DPAPI for the current user on Windows. Where no such store is reachable (web,
+## Android, iOS, consoles, or a desktop without one) nothing is saved: keep the token in the platform's
+## secure storage yourself and call restore_session_from(token).
 var persist_session := false
 ## Refresh when this many seconds are left. The service accepts a refresh at any time while the login is live.
 var refresh_margin := 24 * 3600
-const SESSION_FILE := "user://blazium_session.dat"
+## Written by earlier versions with a key anyone holding the game could rebuild. Never read, only deleted.
+const LEGACY_SESSION_FILE := "user://blazium_session.dat"
+## Windows only: the login token sealed with DPAPI for the current user and this game.
+const SESSION_DPAPI_FILE := "user://blazium_session.dpapi"
+const SESSION_SERVICE := "blazium-games"
+const KEYCHAIN_TOOL := "/usr/bin/security"
+const CREDENTIAL_TOOL_TIMEOUT_MSEC := 15000
 var _refresh_clock := 0.0
 var _refreshing := false
 
@@ -236,6 +277,7 @@ func refresh_session() -> bool:
 	if jwt == "" or _refreshing or not is_inside_tree():
 		return false
 	_refreshing = true
+	var gen := _login_gen
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
@@ -246,6 +288,8 @@ func refresh_session() -> bool:
 		return false
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gen != _login_gen:
+		return false
 	_refreshing = false
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return false
@@ -264,7 +308,12 @@ func refresh_session() -> bool:
 ## Uses a login token the game kept elsewhere (a platform secure store, for example). If it is
 ## close to expiry it is refreshed first. Emits logged_in on success, login_failed otherwise.
 func restore_session_from(token: String) -> void:
+	_new_login_session()
+	_end_account_session()
+	_drop_steam_session()
+	var gen := _login_gen
 	jwt = token.strip_edges()
+	user_id = ""
 	_session_expired_sent = false
 	var left := session_expiry() - int(Time.get_unix_time_from_system())
 	if jwt == "" or left <= 0:
@@ -274,6 +323,8 @@ func restore_session_from(token: String) -> void:
 	var ok := true
 	if left <= refresh_margin:
 		ok = await refresh_session()
+	if gen != _login_gen:
+		return
 	if not ok and session_expiry() <= int(Time.get_unix_time_from_system()):
 		jwt = ""
 		login_failed.emit("The saved sign-in could not be renewed")
@@ -283,6 +334,7 @@ func restore_session_from(token: String) -> void:
 
 ## Reads the login saved by an earlier run when persist_session is on. Emits logged_in or login_failed.
 func restore_session() -> void:
+	_end_account_session()
 	if not persist_session:
 		login_failed.emit("Saved sign-ins are off")
 		return
@@ -294,11 +346,16 @@ func restore_session() -> void:
 
 ## Signs out: the service ends this login, and the saved copy and cached tokens are dropped.
 func logout() -> void:
+	_end_account_session()
 	var token := jwt
+	cancel_login()
+	_new_login_session()
+	_steam_gen += 1
+	forget_scoped_tokens()
 	jwt = ""
 	user_id = ""
 	steam_token = ""
-	forget_scoped_tokens()
+	steam_id = ""
 	_forget_saved_session()
 	_reporting = false
 	if token != "" and is_inside_tree():
@@ -310,38 +367,143 @@ func logout() -> void:
 		http.queue_free()
 	logged_out.emit()
 
-func _session_key() -> String:
-	var device := OS.get_unique_id() if OS.get_name() != "Web" else ""
-	return ("blazium-session|" + game_uid + "|" + device).sha256_text()
+## Starts a new login generation: replies to calls made under the previous login are ignored.
+func _new_login_session() -> void:
+	_login_gen += 1
+	_refreshing = false
+	_refresh_clock = 0.0
+
+## Which credential store holds the saved login here: "secret-tool", "keychain", "dpapi", or "" for none.
+func _session_store() -> String:
+	if not _valid_uid(game_uid):
+		return ""
+	if OS.has_feature("linuxbsd"):
+		return "secret-tool" if _secret_tool() != "" else ""
+	if OS.get_name() == "macOS":
+		return "keychain" if FileAccess.file_exists(KEYCHAIN_TOOL) else ""
+	if OS.get_name() == "Windows":
+		return "dpapi" if _powershell() != "" else ""
+	return ""
+
+func _secret_tool() -> String:
+	# OS.execute with output runs through sh on Unix, so only plain directories are accepted.
+	var plain := RegEx.new()
+	plain.compile("^/[A-Za-z0-9._/+-]*$")
+	for dir in OS.get_environment("PATH").split(":", false):
+		if plain.search(dir) == null:
+			continue
+		var path := dir.path_join("secret-tool")
+		if FileAccess.file_exists(path):
+			return path
+	return ""
+
+func _powershell() -> String:
+	var root := OS.get_environment("SystemRoot")
+	if root == "" or not root.is_absolute_path():
+		return ""
+	var path := root.trim_suffix("\\") + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+	return path if FileAccess.file_exists(path) else ""
+
+## A login token is a JWT. Anything else is neither stored nor accepted back from a store.
+func _storable_token(token: String) -> bool:
+	var re := RegEx.new()
+	re.compile("^[A-Za-z0-9_.-]{1,16384}$")
+	return re.search(token) != null
+
+func _ps_literal(text: String) -> String:
+	for quote in ["'", "\u2018", "\u2019", "\u201A", "\u201B"]:
+		text = text.replace(quote, quote + quote)
+	return "'" + text + "'"
+
+func _ps_args(script: String) -> PackedStringArray:
+	var full := "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';Add-Type -AssemblyName System.Security;" + script
+	return PackedStringArray(["-NoProfile", "-NonInteractive", "-EncodedCommand", Marshalls.raw_to_base64(full.to_utf16_buffer())])
+
+func _dpapi_entropy() -> String:
+	return "[Text.Encoding]::UTF8.GetBytes(%s)" % _ps_literal("blazium-session|" + game_uid)
+
+## Hands secret to a credential tool on its stdin, so it never appears in a command line.
+func _pipe_secret(path: String, args: PackedStringArray, secret: String) -> bool:
+	var proc := OS.execute_with_pipe(path, args)
+	if proc.is_empty():
+		return false
+	var stdio: FileAccess = proc["stdio"]
+	stdio.store_string(secret)
+	stdio.close()
+	var pid: int = proc["pid"]
+	var deadline := Time.get_ticks_msec() + CREDENTIAL_TOOL_TIMEOUT_MSEC
+	var ok := true
+	while OS.is_process_running(pid):
+		if Time.get_ticks_msec() > deadline:
+			OS.kill(pid)
+			ok = false
+			break
+		OS.delay_msec(10)
+	var stderr = proc.get("stderr", null)
+	if stderr is FileAccess:
+		stderr.close()
+	return ok and OS.get_process_exit_code(pid) == 0
 
 func _save_session() -> void:
-	if not persist_session or jwt == "":
+	_forget_legacy_session_file()
+	if not persist_session or jwt == "" or not _storable_token(jwt):
 		return
-	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.WRITE, _session_key())
-	if file == null:
-		return
-	file.store_string(jwt)
-	file.close()
+	match _session_store():
+		"secret-tool":
+			_pipe_secret(_secret_tool(), PackedStringArray(["store", "--label=Blazium Games sign-in", "service", SESSION_SERVICE, "game", game_uid]), jwt)
+		"keychain":
+			# Interactive mode reads the command from stdin. game_uid and the token are checked to hold no spaces or quotes.
+			_pipe_secret(KEYCHAIN_TOOL, PackedStringArray(["-i"]), "add-generic-password -U -s %s -a %s -w %s\n" % [SESSION_SERVICE, game_uid, jwt])
+		"dpapi":
+			var target := _ps_literal(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+			_pipe_secret(_powershell(), _ps_args(
+				"$t=[Console]::In.ReadToEnd().Trim();" +
+				"$b=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($t)," + _dpapi_entropy() + ",[Security.Cryptography.DataProtectionScope]::CurrentUser);" +
+				"[IO.File]::WriteAllText(" + target + ",[Convert]::ToBase64String($b))"
+			), jwt)
 
 func _load_session() -> String:
-	if not FileAccess.file_exists(SESSION_FILE):
+	_forget_legacy_session_file()
+	var out := []
+	var code := -1
+	match _session_store():
+		"secret-tool":
+			code = OS.execute(_secret_tool(), PackedStringArray(["lookup", "service", SESSION_SERVICE, "game", game_uid]), out)
+		"keychain":
+			code = OS.execute(KEYCHAIN_TOOL, PackedStringArray(["find-generic-password", "-s", SESSION_SERVICE, "-a", game_uid, "-w"]), out)
+		"dpapi":
+			if not FileAccess.file_exists(SESSION_DPAPI_FILE):
+				return ""
+			var source := _ps_literal(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+			code = OS.execute(_powershell(), _ps_args(
+				"$b=[Convert]::FromBase64String([IO.File]::ReadAllText(" + source + ").Trim());" +
+				"[Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b," + _dpapi_entropy() + ",[Security.Cryptography.DataProtectionScope]::CurrentUser)))"
+			), out)
+	if code != 0 or out.is_empty():
 		return ""
-	var file := FileAccess.open_encrypted_with_pass(SESSION_FILE, FileAccess.READ, _session_key())
-	if file == null:
-		return ""
-	var text := file.get_as_text()
-	file.close()
-	return text.strip_edges()
+	var token := str(out[0]).strip_edges()
+	return token if _storable_token(token) else ""
 
 func _forget_saved_session() -> void:
-	if FileAccess.file_exists(SESSION_FILE):
-		DirAccess.remove_absolute(ProjectSettings.globalize_path(SESSION_FILE))
+	_forget_legacy_session_file()
+	match _session_store():
+		"secret-tool":
+			OS.execute(_secret_tool(), PackedStringArray(["clear", "service", SESSION_SERVICE, "game", game_uid]), [])
+		"keychain":
+			OS.execute(KEYCHAIN_TOOL, PackedStringArray(["delete-generic-password", "-s", SESSION_SERVICE, "-a", game_uid]), [])
+	if FileAccess.file_exists(SESSION_DPAPI_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(SESSION_DPAPI_FILE))
+
+func _forget_legacy_session_file() -> void:
+	if FileAccess.file_exists(LEGACY_SESSION_FILE):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(LEGACY_SESSION_FILE))
 
 ## Asks for the chat sign-in details (host, port, nick and a ten minute password) for the Blazium IRC
 ## server. Use it with await. It needs a login. The reply is the service's fields, or {"ok": false, "error"}.
 func request_chat_token() -> Dictionary:
 	if jwt == "" or not is_inside_tree():
 		return {"ok": false, "error": "sign in before asking for chat access"}
+	var gen := _login_gen
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
@@ -350,6 +512,8 @@ func request_chat_token() -> Dictionary:
 		return {"ok": false, "error": "the chat request could not be sent"}
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gen != _login_gen:
+		return {"ok": false, "error": "the sign-in changed while chat access was requested"}
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return {"ok": false, "error": "the chat service could not be reached"}
 	var code: int = result[1]
@@ -395,9 +559,14 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 	if hex == "":
 		steam_sign_in_failed.emit("ticket is empty")
 		return
+	_steam_gen += 1
+	var gen := _steam_gen
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		if gen != _steam_gen:
+			http.queue_free()
+			return
 		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
@@ -405,6 +574,8 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 		else:
 			steam_token = str(body.get("token", ""))
 			steam_id = str(body.get("steam_id", ""))
+			# Scoped tokens may have come from the Steam session this one replaces.
+			forget_scoped_tokens()
 			if steam_token == "":
 				steam_sign_in_failed.emit("Steam sign-in had no token")
 			else:
@@ -795,6 +966,7 @@ func request_scoped_token(audience: String) -> Dictionary:
 	var held = _scoped_tokens.get(want, null)
 	if typeof(held) == TYPE_DICTIONARY and Time.get_ticks_msec() < int(held.get("until", 0)):
 		return held["reply"].duplicate()
+	var gens := [_login_gen, _steam_gen, _scoped_gen]
 	var url := ""
 	var headers := PackedStringArray(["Content-Type: application/json"])
 	var body := ""
@@ -827,6 +999,8 @@ func request_scoped_token(audience: String) -> Dictionary:
 		return _token_failure("service_unavailable", "the token request could not be sent")
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gens != [_login_gen, _steam_gen, _scoped_gen]:
+		return _token_failure("session_changed", "the sign-in changed while the token was requested")
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return _token_failure("service_unavailable", "the token service could not be reached")
 	var code: int = result[1]
@@ -852,8 +1026,10 @@ func request_scoped_token(audience: String) -> Dictionary:
 	return reply.duplicate()
 
 ## Drops every cached token, so the next request asks again. Done on sign-in and after a 401.
+## A token request still in flight is not cached and is refused to its caller.
 func forget_scoped_tokens() -> void:
 	_scoped_tokens.clear()
+	_scoped_gen += 1
 
 func _token_failure(code: String, message: String) -> Dictionary:
 	return {"ok": false, "code": code, "error": message}
