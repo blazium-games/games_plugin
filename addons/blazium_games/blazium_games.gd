@@ -101,6 +101,7 @@ func _ready() -> void:
 ## logout, start_login and restore, so a lobby or relay list cannot outlive the login it was made with.
 func _end_account_session() -> void:
 	session_epoch += 1
+	forget_scoped_tokens()
 	var tree := get_tree()
 	if tree == null:
 		return
@@ -283,6 +284,7 @@ func refresh_session() -> bool:
 func restore_session_from(token: String) -> void:
 	_end_account_session()
 	jwt = token.strip_edges()
+	user_id = ""
 	_session_expired_sent = false
 	var left := session_expiry() - int(Time.get_unix_time_from_system())
 	if jwt == "" or left <= 0:
