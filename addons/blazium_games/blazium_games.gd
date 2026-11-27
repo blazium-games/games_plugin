@@ -88,11 +88,27 @@ var login_timeout := 120.0
 var _login_elapsed := 0.0
 var _session_expired_sent := false
 
+## Changes whenever the signed-in account may change (sign-out, a new sign-in, a restore). It is shared
+## by every node in the process: lobby and ICE nodes record it when they are admitted and drop the
+## socket, admit ticket and relay servers they hold once it moves on.
+static var session_epoch := 0
+
 func _ready() -> void:
 	add_to_group("blazium_games")
 	game_uid = str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
 
+## Ends everything the previous account opened through the other nodes. Runs before anything else in
+## logout, start_login and restore, so a lobby or relay list cannot outlive the login it was made with.
+func _end_account_session() -> void:
+	session_epoch += 1
+	var tree := get_tree()
+	if tree == null:
+		return
+	tree.call_group("blazium_lobby", "forget_session")
+	tree.call_group("blazium_ice", "forget_session")
+
 func start_login() -> void:
+	_end_account_session()
 	if not _valid_uid(game_uid):
 		login_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
@@ -171,6 +187,7 @@ func _on_message(message: Dictionary) -> void:
 		if token == "":
 			login_failed.emit("Login response had no token")
 			return
+		_end_account_session()
 		jwt = token
 		_reporting = true
 		_play_accum = 0.0
@@ -264,6 +281,7 @@ func refresh_session() -> bool:
 ## Uses a login token the game kept elsewhere (a platform secure store, for example). If it is
 ## close to expiry it is refreshed first. Emits logged_in on success, login_failed otherwise.
 func restore_session_from(token: String) -> void:
+	_end_account_session()
 	jwt = token.strip_edges()
 	_session_expired_sent = false
 	var left := session_expiry() - int(Time.get_unix_time_from_system())
@@ -283,6 +301,7 @@ func restore_session_from(token: String) -> void:
 
 ## Reads the login saved by an earlier run when persist_session is on. Emits logged_in or login_failed.
 func restore_session() -> void:
+	_end_account_session()
 	if not persist_session:
 		login_failed.emit("Saved sign-ins are off")
 		return
@@ -294,6 +313,7 @@ func restore_session() -> void:
 
 ## Signs out: the service ends this login, and the saved copy and cached tokens are dropped.
 func logout() -> void:
+	_end_account_session()
 	var token := jwt
 	jwt = ""
 	user_id = ""
