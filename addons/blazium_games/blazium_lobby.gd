@@ -61,6 +61,16 @@ var _game_uid := ""
 var _inflight_id := ""
 var _inflight_op := ""
 var _announced_join := ""
+## BlaziumGames.session_epoch when the current admit was asked for. An admit reply, socket or ticket
+## from an older epoch belongs to an account that is no longer signed in.
+var _epoch := -1
+
+func _ready() -> void:
+	add_to_group("blazium_lobby")
+
+func _enter_tree() -> void:
+	if _holds_session() and _epoch != BlaziumGames.session_epoch:
+		forget_session()
 
 func create_lobby(jwt: String, lobby_type: String, options: Dictionary = {}) -> void:
 	var game_uid := str(ProjectSettings.get_setting("blazium/game/game_uid", ""))
@@ -123,6 +133,9 @@ func _connect(jwt: String) -> void:
 func _process(_delta: float) -> void:
 	if _socket == null:
 		return
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
+		return
 	_socket.poll()
 	if _socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
 		_socket = null
@@ -144,10 +157,15 @@ func _process(_delta: float) -> void:
 		_on_message(parsed)
 
 func _ask_service(jwt: String, path: String, body: Dictionary) -> void:
+	var epoch := BlaziumGames.session_epoch
+	_epoch = epoch
 	_hold_ice(true)
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		if epoch != BlaziumGames.session_epoch:
+			http.queue_free()
+			return
 		var parsed = JSON.parse_string(raw.get_string_from_utf8())
 		if result != HTTPRequest.RESULT_SUCCESS or (code != 200 and code != 202):
 			_queued_op = ""
@@ -279,7 +297,8 @@ func _on_message(message: Dictionary) -> void:
 func leave_lobby() -> void:
 	if _socket != null and _socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
 		_send("leave_lobby", {})
-		_socket.close()
+		if _socket != null:
+			_socket.close()
 	_socket = null
 	_authed = false
 	_queued_op = ""
@@ -288,12 +307,34 @@ func leave_lobby() -> void:
 	_inflight_op = ""
 	_announced_join = ""
 
+## Closes the socket and drops the admit ticket and login. BlaziumGames calls it on sign-out, on a new
+## sign-in and on a restore, so the next player cannot act in this lobby as the previous one.
+func forget_session() -> void:
+	if _socket != null:
+		_socket.close()
+	_socket = null
+	_jwt = ""
+	_ticket = ""
+	_authed = false
+	_pending_join = ""
+	_queued_op = ""
+	_queued_payload = {}
+	_inflight_id = ""
+	_inflight_op = ""
+	_announced_join = ""
+
+func _holds_session() -> bool:
+	return _socket != null or _ticket != "" or _jwt != "" or _queued_op != ""
+
 func _peers(payload: Dictionary) -> Array:
 	var peers = payload.get("peers", [])
 	return peers if typeof(peers) == TYPE_ARRAY else []
 
 func _send(op: String, payload: Dictionary) -> void:
 	if _socket == null:
+		return
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
 		return
 	var request_id := str(_next_id)
 	var envelope := {

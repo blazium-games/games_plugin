@@ -15,9 +15,15 @@ var ice_session_id := ""
 var _http: HTTPRequest
 var _hold := false
 var _deferred_jwt := ""
+## BlaziumGames.session_epoch for the relay servers, admitted session and deferred login held here.
+var _epoch := BlaziumGames.session_epoch
 
 func _ready() -> void:
 	add_to_group("blazium_ice")
+
+func _enter_tree() -> void:
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
 
 func set_ice_enabled(on: bool) -> void:
 	ice_enabled = on
@@ -26,7 +32,20 @@ func cancel_ice_hold() -> void:
 	_hold = false
 	_deferred_jwt = ""
 
+## Drops the relay servers (their credentials belong to the previous login), the admitted session and
+## any deferred login. BlaziumGames calls it on sign-out, on a new sign-in and on a restore.
+func forget_session() -> void:
+	if _http != null:
+		_http.cancel_request()
+	ice_servers = []
+	ice_session_id = ""
+	_hold = false
+	_deferred_jwt = ""
+	_epoch = BlaziumGames.session_epoch
+
 func hold_ice(on: bool) -> void:
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
 	_hold = on
 	if on or _deferred_jwt == "":
 		return
@@ -35,6 +54,8 @@ func hold_ice(on: bool) -> void:
 	fetch_ice(jwt, "")
 
 func note_lobby(result: Dictionary) -> void:
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
 	var body: Dictionary = result
 	if body.has("data") and typeof(body["data"]) == TYPE_DICTIONARY:
 		body = body["data"]
@@ -45,6 +66,8 @@ func note_lobby(result: Dictionary) -> void:
 		ice_session_id = admitted
 
 func fetch_ice(jwt: String, _session_id: String) -> void:
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
 	if _hold:
 		_deferred_jwt = jwt
 		return
@@ -69,6 +92,9 @@ func fetch_ice(jwt: String, _session_id: String) -> void:
 		ice_denied.emit()
 
 func _on_ice(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if _epoch != BlaziumGames.session_epoch:
+		forget_session()
+		return
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		ice_servers = []
 		ice_denied.emit()
