@@ -115,6 +115,12 @@ func _end_account_session() -> void:
 	tree.call_group("blazium_lobby", "forget_session")
 	tree.call_group("blazium_ice", "forget_session")
 
+## Forgets the Steam session of the previous player; a Steam reply still in flight is dropped.
+func _drop_steam_session() -> void:
+	_steam_gen += 1
+	steam_token = ""
+	steam_id = ""
+
 func start_login() -> void:
 	_end_account_session()
 	if not _valid_uid(game_uid):
@@ -122,6 +128,7 @@ func start_login() -> void:
 		return
 	jwt = ""
 	user_id = ""
+	_drop_steam_session()
 	_new_login_session()
 	forget_scoped_tokens()
 	_reporting = true
@@ -303,6 +310,7 @@ func refresh_session() -> bool:
 func restore_session_from(token: String) -> void:
 	_new_login_session()
 	_end_account_session()
+	_drop_steam_session()
 	var gen := _login_gen
 	jwt = token.strip_edges()
 	user_id = ""
@@ -365,9 +373,6 @@ func _new_login_session() -> void:
 	_refreshing = false
 	_refresh_clock = 0.0
 
-func _session_key() -> String:
-	var device := OS.get_unique_id() if OS.get_name() != "Web" else ""
-	return ("blazium-session|" + game_uid + "|" + device).sha256_text()
 ## Which credential store holds the saved login here: "secret-tool", "keychain", "dpapi", or "" for none.
 func _session_store() -> String:
 	if not _valid_uid(game_uid):
