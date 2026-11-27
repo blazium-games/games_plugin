@@ -12,7 +12,7 @@ The long guide is [Engines](https://docs.blazium.games/docs/engines).
 
 ## Scripted API
 
-`BlaziumSapi.invoke(logic, args, opts)` calls `https://sapi.blazium.online/v1/{game_uid}/{logic}` (`call_logic` is kept as an alias). Results come on `call_completed` and `call_failed`. A signed-in call sends a short-lived token for this game that `BlaziumGames.request_scoped_token("sapi")` asked for; the login token is never sent. A native game asks games_service with its login. A browser game has no login, so it asks the play origin that served it with `POST /blazium/token`. A 429 or 503 is retried with the same `Idempotency-Key`, and a 401 asks for a fresh token once. Pass `{"anonymous": true}` for logic marked `auth = anonymous`.
+`BlaziumSapi.invoke(logic, args, opts)` calls `https://sapi.blazium.online/v1/{game_uid}/{logic}` (`call_logic` is kept as an alias). Results come on `call_completed` and `call_failed`. A signed-in call sends a short-lived token for this game that `BlaziumGames.request_scoped_token("sapi")` asked for; the login token and the Steam session are never sent. A native game asks games_service with its login, or with the Steam session for a Steam-only player. A browser game has no login, so it asks the play origin that served it with `POST /blazium/token`. A 429 or 503 is retried with the same `Idempotency-Key`, and a 401 asks for a fresh token once. Pass `{"anonymous": true}` for logic marked `auth = anonymous`.
 
 ```gdscript
 var reply: Dictionary = await $BlaziumGames.request_scoped_token("lobby")

@@ -55,9 +55,9 @@ func _base() -> String:
 		return "https://%s.discordsays.com/.proxy/blazium/sapi" % id
 	return SAPI
 
-## The Authorization token for one attempt, or "" when there is none. A Steam session sends its own
-## token. Otherwise the BlaziumGames node asks for a short-lived token for this game: this class
-## never reads or sends the login token.
+## The Authorization token for one attempt, or "" when there is none. The BlaziumGames node asks for a
+## short-lived token for this game (a Steam-only player asks with the Steam session): this class never
+## reads or sends the login token or the Steam session.
 func _bearer(req: Dictionary) -> String:
 	req["scoped"] = false
 	if not is_inside_tree():
@@ -65,9 +65,6 @@ func _bearer(req: Dictionary) -> String:
 	var games := get_tree().get_first_node_in_group("blazium_games")
 	if games == null:
 		return ""
-	var steam := str(games.get("steam_token"))
-	if steam != "" and steam != "<null>":
-		return steam
 	if not games.has_method("request_scoped_token"):
 		return ""
 	var reply: Dictionary = await games.request_scoped_token("sapi")

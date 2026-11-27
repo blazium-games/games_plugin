@@ -22,10 +22,10 @@ assert "blazium/discord/application_id" in pin
 assert "host_id != configured" in pin
 
 # The token comes from the BlaziumGames node, which requests a short-lived one for this game.
-# The login token is never read here; anonymous calls skip it.
+# Neither the login token nor the Steam session is read here; anonymous calls skip it.
 token = sapi.split("func _bearer", 1)[1].split("func _forget_tokens", 1)[0]
 assert 'get_first_node_in_group("blazium_games")' in token
-assert '"steam_token"' in token
+assert "steam_token" not in sapi, "the Scripted API client must not read the Steam session"
 assert '"jwt"' not in token and "games.jwt" not in token, "the Scripted API client must not read the login token"
 assert 'request_scoped_token("sapi")' in token
 assert '"anonymous"' in call
@@ -60,6 +60,7 @@ assert "blazium/sapi/channel" in sapi
 games = Path("addons/blazium_games/blazium_games.gd").read_text(encoding="utf-8")
 req = games.split("func request_scoped_token", 1)[1].split("func forget_scoped_tokens", 1)[0]
 assert '"/private/games/" + game_uid.uri_encode() + "/tokens"' in req
+assert '_api() + "/steam/" + game_uid.uri_encode() + "/tokens"' in req
 assert '"/blazium/token"' in games and ".proxy/blazium/token" in games
 assert 'want != "sapi" and want != "lobby"' in req
 assert "_scoped_tokens" in req and "Time.get_ticks_msec()" in req
