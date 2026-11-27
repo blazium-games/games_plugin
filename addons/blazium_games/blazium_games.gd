@@ -78,6 +78,12 @@ var steam_id: String = ""
 
 ## Short-lived tokens by audience ("sapi", "lobby"): {"reply": Dictionary, "until": msec}.
 var _scoped_tokens := {}
+## Bumped whenever the Blazium login, the Steam session, or the scoped-token cache is replaced or
+## dropped. A network call records them when it starts and discards its reply if they changed, so
+## a reply for a player who signed out, or was replaced, never becomes the current session.
+var _login_gen := 0
+var _steam_gen := 0
+var _scoped_gen := 0
 
 var _socket: WebSocketPeer
 var _sent_getid := false
@@ -98,6 +104,7 @@ func start_login() -> void:
 		return
 	jwt = ""
 	user_id = ""
+	_new_login_session()
 	forget_scoped_tokens()
 	_reporting = true
 	_play_accum = 0.0
@@ -171,6 +178,8 @@ func _on_message(message: Dictionary) -> void:
 		if token == "":
 			login_failed.emit("Login response had no token")
 			return
+		_new_login_session()
+		forget_scoped_tokens()
 		jwt = token
 		_reporting = true
 		_play_accum = 0.0
@@ -236,6 +245,7 @@ func refresh_session() -> bool:
 	if jwt == "" or _refreshing or not is_inside_tree():
 		return false
 	_refreshing = true
+	var gen := _login_gen
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
@@ -246,6 +256,8 @@ func refresh_session() -> bool:
 		return false
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gen != _login_gen:
+		return false
 	_refreshing = false
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return false
@@ -264,6 +276,9 @@ func refresh_session() -> bool:
 ## Uses a login token the game kept elsewhere (a platform secure store, for example). If it is
 ## close to expiry it is refreshed first. Emits logged_in on success, login_failed otherwise.
 func restore_session_from(token: String) -> void:
+	_new_login_session()
+	forget_scoped_tokens()
+	var gen := _login_gen
 	jwt = token.strip_edges()
 	_session_expired_sent = false
 	var left := session_expiry() - int(Time.get_unix_time_from_system())
@@ -274,6 +289,8 @@ func restore_session_from(token: String) -> void:
 	var ok := true
 	if left <= refresh_margin:
 		ok = await refresh_session()
+	if gen != _login_gen:
+		return
 	if not ok and session_expiry() <= int(Time.get_unix_time_from_system()):
 		jwt = ""
 		login_failed.emit("The saved sign-in could not be renewed")
@@ -295,10 +312,14 @@ func restore_session() -> void:
 ## Signs out: the service ends this login, and the saved copy and cached tokens are dropped.
 func logout() -> void:
 	var token := jwt
+	cancel_login()
+	_new_login_session()
+	_steam_gen += 1
+	forget_scoped_tokens()
 	jwt = ""
 	user_id = ""
 	steam_token = ""
-	forget_scoped_tokens()
+	steam_id = ""
 	_forget_saved_session()
 	_reporting = false
 	if token != "" and is_inside_tree():
@@ -309,6 +330,12 @@ func logout() -> void:
 			await http.request_completed
 		http.queue_free()
 	logged_out.emit()
+
+## Starts a new login generation: replies to calls made under the previous login are ignored.
+func _new_login_session() -> void:
+	_login_gen += 1
+	_refreshing = false
+	_refresh_clock = 0.0
 
 func _session_key() -> String:
 	var device := OS.get_unique_id() if OS.get_name() != "Web" else ""
@@ -342,6 +369,7 @@ func _forget_saved_session() -> void:
 func request_chat_token() -> Dictionary:
 	if jwt == "" or not is_inside_tree():
 		return {"ok": false, "error": "sign in before asking for chat access"}
+	var gen := _login_gen
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
@@ -350,6 +378,8 @@ func request_chat_token() -> Dictionary:
 		return {"ok": false, "error": "the chat request could not be sent"}
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gen != _login_gen:
+		return {"ok": false, "error": "the sign-in changed while chat access was requested"}
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return {"ok": false, "error": "the chat service could not be reached"}
 	var code: int = result[1]
@@ -395,9 +425,14 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 	if hex == "":
 		steam_sign_in_failed.emit("ticket is empty")
 		return
+	_steam_gen += 1
+	var gen := _steam_gen
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		if gen != _steam_gen:
+			http.queue_free()
+			return
 		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
@@ -405,6 +440,8 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 		else:
 			steam_token = str(body.get("token", ""))
 			steam_id = str(body.get("steam_id", ""))
+			# Scoped tokens may have come from the Steam session this one replaces.
+			forget_scoped_tokens()
 			if steam_token == "":
 				steam_sign_in_failed.emit("Steam sign-in had no token")
 			else:
@@ -795,6 +832,7 @@ func request_scoped_token(audience: String) -> Dictionary:
 	var held = _scoped_tokens.get(want, null)
 	if typeof(held) == TYPE_DICTIONARY and Time.get_ticks_msec() < int(held.get("until", 0)):
 		return held["reply"].duplicate()
+	var gens := [_login_gen, _steam_gen, _scoped_gen]
 	var url := ""
 	var headers := PackedStringArray(["Content-Type: application/json"])
 	var body := ""
@@ -827,6 +865,8 @@ func request_scoped_token(audience: String) -> Dictionary:
 		return _token_failure("service_unavailable", "the token request could not be sent")
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if gens != [_login_gen, _steam_gen, _scoped_gen]:
+		return _token_failure("session_changed", "the sign-in changed while the token was requested")
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return _token_failure("service_unavailable", "the token service could not be reached")
 	var code: int = result[1]
@@ -852,8 +892,10 @@ func request_scoped_token(audience: String) -> Dictionary:
 	return reply.duplicate()
 
 ## Drops every cached token, so the next request asks again. Done on sign-in and after a 401.
+## A token request still in flight is not cached and is refused to its caller.
 func forget_scoped_tokens() -> void:
 	_scoped_tokens.clear()
+	_scoped_gen += 1
 
 func _token_failure(code: String, message: String) -> Dictionary:
 	return {"ok": false, "code": code, "error": message}
