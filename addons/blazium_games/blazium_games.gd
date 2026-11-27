@@ -78,6 +78,8 @@ var steam_id: String = ""
 
 ## Short-lived tokens by audience ("sapi", "lobby"): {"reply": Dictionary, "until": msec}.
 var _scoped_tokens := {}
+## Advances whenever the player may have changed. A reply to a request sent under an older value is dropped.
+var _session_gen := 0
 
 var _socket: WebSocketPeer
 var _sent_getid := false
@@ -96,11 +98,8 @@ func start_login() -> void:
 	if not _valid_uid(game_uid):
 		login_failed.emit("blazium/game/game_uid must be the project UUID")
 		return
-	jwt = ""
-	user_id = ""
-	forget_scoped_tokens()
+	_drop_account()
 	_reporting = true
-	_play_accum = 0.0
 	_sent_getid = false
 	_login_elapsed = 0.0
 	_session_expired_sent = false
@@ -113,6 +112,23 @@ func start_login() -> void:
 	if err != OK:
 		login_failed.emit("WebSocket connect failed")
 		_socket = null
+
+## Forgets everything tied to the player who was signed in: the login, the Steam session, cached
+## scoped tokens and unsent playtime. Runs before any sign-in, restore or sign-out waits on the network.
+func _drop_account() -> void:
+	_session_gen += 1
+	jwt = ""
+	user_id = ""
+	steam_token = ""
+	steam_id = ""
+	forget_scoped_tokens()
+	_play_accum = 0.0
+	_refreshing = false
+
+## Changes whenever the signed-in player may have changed. A caller that waits between getting a
+## credential and using it compares this to make sure it is still acting for the same player.
+func session_generation() -> int:
+	return _session_gen
 
 func cancel_login() -> void:
 	_login_elapsed = 0.0
@@ -236,17 +252,23 @@ func refresh_session() -> bool:
 	if jwt == "" or _refreshing or not is_inside_tree():
 		return false
 	_refreshing = true
+	var session := _session_gen
+	var asked := jwt
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
-	var err := http.request(_api() + "/public/token/refresh", ["Authorization: Bearer " + jwt], HTTPClient.METHOD_POST)
+	var err := http.request(_api() + "/public/token/refresh", ["Authorization: Bearer " + asked], HTTPClient.METHOD_POST)
 	if err != OK:
 		http.queue_free()
 		_refreshing = false
 		return false
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if session != _session_gen:
+		return false
 	_refreshing = false
+	if asked != jwt:
+		return false
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return false
 	var code: int = result[1]
@@ -264,6 +286,9 @@ func refresh_session() -> bool:
 ## Uses a login token the game kept elsewhere (a platform secure store, for example). If it is
 ## close to expiry it is refreshed first. Emits logged_in on success, login_failed otherwise.
 func restore_session_from(token: String) -> void:
+	cancel_login()
+	_drop_account()
+	var session := _session_gen
 	jwt = token.strip_edges()
 	_session_expired_sent = false
 	var left := session_expiry() - int(Time.get_unix_time_from_system())
@@ -274,6 +299,8 @@ func restore_session_from(token: String) -> void:
 	var ok := true
 	if left <= refresh_margin:
 		ok = await refresh_session()
+		if session != _session_gen:
+			return
 	if not ok and session_expiry() <= int(Time.get_unix_time_from_system()):
 		jwt = ""
 		login_failed.emit("The saved sign-in could not be renewed")
@@ -295,10 +322,8 @@ func restore_session() -> void:
 ## Signs out: the service ends this login, and the saved copy and cached tokens are dropped.
 func logout() -> void:
 	var token := jwt
-	jwt = ""
-	user_id = ""
-	steam_token = ""
-	forget_scoped_tokens()
+	cancel_login()
+	_drop_account()
 	_forget_saved_session()
 	_reporting = false
 	if token != "" and is_inside_tree():
@@ -395,14 +420,21 @@ func sign_in_with_steam_ticket(ticket: String) -> void:
 	if hex == "":
 		steam_sign_in_failed.emit("ticket is empty")
 		return
+	var session := _session_gen
 	var http := HTTPRequest.new()
 	add_child(http)
 	http.request_completed.connect(func(result: int, code: int, _headers: PackedStringArray, raw: PackedByteArray) -> void:
+		if session != _session_gen:
+			http.queue_free()
+			steam_sign_in_failed.emit("Another sign-in started before Steam sign-in finished")
+			return
 		_note_http(code)
 		var body := _data(raw)
 		if code < 200 or code >= 300 or typeof(body) != TYPE_DICTIONARY:
 			steam_sign_in_failed.emit(_error_text(body, "Steam sign-in failed"))
 		else:
+			# Tokens cached so far were asked for by whoever was signed in before this Steam session.
+			forget_scoped_tokens()
 			steam_token = str(body.get("token", ""))
 			steam_id = str(body.get("steam_id", ""))
 			if steam_token == "":
@@ -818,6 +850,9 @@ func request_scoped_token(audience: String) -> Dictionary:
 		return _token_failure("not_logged_on", "sign in before asking for a token")
 	if not is_inside_tree():
 		return _token_failure("no_host", "the Blazium node is not in the scene tree")
+	var session := _session_gen
+	var asked_jwt := jwt
+	var asked_steam := steam_token
 	var http := HTTPRequest.new()
 	http.timeout = 15.0
 	add_child(http)
@@ -827,6 +862,8 @@ func request_scoped_token(audience: String) -> Dictionary:
 		return _token_failure("service_unavailable", "the token request could not be sent")
 	var result: Array = await http.request_completed
 	http.queue_free()
+	if session != _session_gen or asked_jwt != jwt or asked_steam != steam_token:
+		return _token_failure("session_changed", "the player changed before the token arrived")
 	if result.size() < 4 or int(result[0]) != HTTPRequest.RESULT_SUCCESS:
 		return _token_failure("service_unavailable", "the token service could not be reached")
 	var code: int = result[1]

@@ -57,7 +57,8 @@ func _base() -> String:
 
 ## The Authorization token for one attempt, or "" when there is none. A Steam session sends its own
 ## token. Otherwise the BlaziumGames node asks for a short-lived token for this game: this class
-## never reads or sends the login token.
+## never reads or sends the login token. A call stays with the player who was signed in when it was
+## first sent: if that changes before a retry, req["stale"] is set and no token is returned.
 func _bearer(req: Dictionary) -> String:
 	req["scoped"] = false
 	if not is_inside_tree():
@@ -65,16 +66,29 @@ func _bearer(req: Dictionary) -> String:
 	var games := get_tree().get_first_node_in_group("blazium_games")
 	if games == null:
 		return ""
+	var owner := _session_owner(games)
+	if req.has("owner") and req["owner"] != owner:
+		req["stale"] = true
+		return ""
+	req["owner"] = owner
 	var steam := str(games.get("steam_token"))
 	if steam != "" and steam != "<null>":
 		return steam
 	if not games.has_method("request_scoped_token"):
 		return ""
 	var reply: Dictionary = await games.request_scoped_token("sapi")
+	if _session_owner(games) != owner:
+		req["stale"] = true
+		return ""
 	if not bool(reply.get("ok", false)):
 		return ""
 	req["scoped"] = true
 	return str(reply.get("token", ""))
+
+static func _session_owner(games: Node) -> String:
+	var generation := int(games.call("session_generation")) if games.has_method("session_generation") else 0
+	var steam := str(games.get("steam_token"))
+	return "%d|%s" % [generation, "" if steam == "<null>" else steam]
 
 func _forget_tokens() -> void:
 	if not is_inside_tree():
@@ -150,6 +164,9 @@ func _send(req: Dictionary, attempt: int) -> void:
 	var headers: PackedStringArray = (req["headers"] as PackedStringArray).duplicate()
 	if not bool(req["anonymous"]):
 		var token := await _bearer(req)
+		if bool(req.get("stale", false)):
+			call_failed.emit(logic, 0, "session_changed", "the player changed before the call was sent", "")
+			return
 		if token != "":
 			headers.append("Authorization: Bearer " + token)
 	var http := HTTPRequest.new()
