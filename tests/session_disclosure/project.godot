@@ -1,0 +1,19 @@
+; Engine configuration file.
+; Test project only. The game id below is a placeholder project id, the same kind of
+; public setting a shipped game stores in its client.
+
+config_version=5
+
+[application]
+
+config/name="SessionDisclosureTest"
+run/main_scene="res://probe.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[blazium]
+
+game/game_uid="11111111-2222-4333-8444-555555555555"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
